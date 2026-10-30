@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lazerfocus</title>
+<meta name="theme-color" content="#0c0b0a">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&family=Instrument+Serif&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top" id="top">
+  <div class="top-left">
+    <div class="brand" aria-label="Lazerfocus">
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><rect x="3" y="3" width="12" height="12" rx="4" fill="none" stroke="currentColor" stroke-width="1.4"/><line x1="0" y1="10.5" x2="18" y2="10.5" stroke="var(--now)" stroke-width="1.4"/></svg>
+      <span>Lazerfocus</span>
+    </div>
+    <div class="menu-wrap">
+      <button class="proj-btn" id="projBtn" data-act="menu" data-menu="projMenu" aria-haspopup="true" aria-expanded="false">
+        <span id="projName"></span>
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+      </button>
+      <div class="menu" id="projMenu" hidden></div>
+    </div>
+    <div class="axnav" role="group" aria-label="Zwischen Zeitachsen wechseln">
+      <button class="pill icon" id="navBack" data-act="nav-back" aria-label="Eine Ebene zurück" title="Eine Ebene zurück (←)"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <span class="axnav-lbl" id="navLabel">Hauptschritte</span>
+      <button class="pill icon" id="navFwd" data-act="nav-fwd" aria-label="Eine Ebene tiefer" title="In die Teilschritte (→)"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </div>
+  </div>
+  <div class="top-right">
+    <span class="saved" id="saved" aria-live="polite"></span>
+    <button class="pill backup-chip" id="backupChip" data-act="backup" title="Jetzt eine Sicherungsdatei speichern" hidden></button>
+    <span class="clock" id="clock"></span>
+    <button class="pill now-btn" data-act="jump-now" title="Zur aktuellen Uhrzeit springen"><i></i><span>Jetzt</span></button>
+    <div class="menu-wrap">
+      <button class="pill icon" data-act="menu" data-menu="moreMenu" aria-label="Weitere Funktionen" aria-haspopup="true" aria-expanded="false">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="3" cy="7" r="1.2" fill="currentColor"/><circle cx="7" cy="7" r="1.2" fill="currentColor"/><circle cx="11" cy="7" r="1.2" fill="currentColor"/></svg>
+      </button>
+      <div class="menu right" id="moreMenu" hidden></div>
+    </div>
+  </div>
+</header>
+
+<main class="stage" id="stage">
+  <section class="col col-main" id="colMain">
+    <div class="col-inner">
+      <div class="axis-head">
+        <span class="eyebrow">Projekt</span>
+        <input class="p-title" id="pTitle" aria-label="Projektname" placeholder="Projektname" autocomplete="off">
+        <div class="p-meta">
+          <button class="fld fld-btn" id="pStart" data-act="pick" data-target="project" aria-label="Projektstart wählen"><span>Start</span><b class="fld-val"></b><svg class="cal-ic" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><rect x="1.5" y="2.5" width="10" height="9" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.5 5.5h10M4.5 1v3M8.5 1v3" stroke="currentColor" stroke-width="1.1"/></svg></button>
+          <button class="fld fld-btn" id="pTarget" data-act="pick" data-target="target" aria-label="Zielzeit wählen"><span>Ziel</span><b class="fld-val"></b><svg class="cal-ic" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><rect x="1.5" y="2.5" width="10" height="9" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.5 5.5h10M4.5 1v3M8.5 1v3" stroke="currentColor" stroke-width="1.1"/></svg></button>
+          <span id="pEnd"></span>
+          <span class="p-prog"><span id="pCount"></span><span class="bar"><i id="pBar"></i></span></span>
+        </div>
+        <div class="p-tools">
+          <button class="chip-btn" id="foldBtn" data-act="fold-toggle" aria-pressed="true" hidden><i class="mini-switch"></i>Erledigte einklappen <b>0</b></button>
+          <button class="chip-btn park-chip" id="parkBtn" data-act="park-list" hidden><svg width="12" height="12" viewBox="0 0 13 13" aria-hidden="true"><path d="M6.5 1.5a3.5 3.5 0 0 0-2 6.4V9.5h4V7.9a3.5 3.5 0 0 0-2-6.4ZM5 11.5h3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>Parkplatz <b>0</b></button>
+        </div>
+      </div>
+      <div class="axis" id="mainAxis" data-axis="main"></div>
+      <p class="hint">Tastatur: <kbd>↑</kbd><kbd>↓</kbd> Schritt wechseln · <kbd>N</kbd> neuer Schritt · <kbd>X</kbd> Status · <kbd>P</kbd> Priorität · <kbd>T</kbd> Teilschritte · <kbd>←</kbd><kbd>→</kbd> Ebene wechseln · <kbd>Esc</kbd> zurück · <kbd>I</kbd> Idee parken · <kbd>?</kbd> alle Kürzel</p>
+    </div>
+  </section>
+
+  <aside class="zoom" id="colSub" hidden>
+    <button class="zoom-giant" id="zoomGiant" data-act="nav-back" aria-label="Herauszoomen, eine Ebene zurück" title="Herauszoomen"><span class="zg-num" id="zgNum"></span></button>
+    <div class="col col-zoom" id="zoomScroll">
+    <div class="col-inner">
+      <div class="sub-head">
+        <button class="pill back-btn" data-act="nav-back"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="backLabel">Zurück</span></button>
+        <nav class="crumbs" id="crumbs" aria-label="Pfad"></nav>
+        <button class="pill icon close" data-act="close-sub" aria-label="Teilschritte schließen">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.4"/></svg>
+        </button>
+        <h2 class="sub-title" id="subTitle"></h2>
+        <div class="p-meta" id="subMeta"></div>
+      </div>
+      <div class="axis" id="subAxis" data-axis="sub"></div>
+    </div>
+    </div>
+  </aside>
+</main>
+
+<div class="coach" id="coach" aria-live="polite" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<div class="overlay" id="dialog" hidden></div>
+<div class="picker" id="picker" role="dialog" aria-label="Datum und Uhrzeit wählen" hidden></div>
+<input type="file" id="importFile" accept="application/json,.json" hidden>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+<script src="sync.js"></script>
+</body>
+</html>
