@@ -43,7 +43,7 @@ const roundedNow = (offsetMin = 0) => { const d = new Date(); d.setSeconds(0, 0)
 /* ---------- Datenmodell ---------- */
 function curLoop() { try { return (typeof state !== 'undefined' && state && proj() && proj().loop) || 1; } catch (e) { return 1; } }
 function newStep(p) {
-  return Object.assign({ id: uid(), title: '', desc: '', at: null, dur: 30, status: 'open', startedAt: null, doneAt: null, prio: false, ideas: '', questions: '', learnings: '', process: '', attachments: [], worked: 0, pauses: [], log: [], loopAdded: curLoop(), children: [] }, p);
+  return Object.assign({ id: uid(), title: '', desc: '', at: null, dur: 30, status: 'open', startedAt: null, doneAt: null, prio: false, ideas: '', questions: '', learnings: '', process: '', attachments: [], deps: [], worked: 0, pauses: [], log: [], loopAdded: curLoop(), children: [] }, p);
 }
 function newProject(title) {
   return normProject({ id: uid(), title: title || 'Neues Projekt', start: roundedNow(15).toISOString(), target: null, foldDone: true, inbox: [], created: Date.now(), steps: [newStep()] });
@@ -61,6 +61,7 @@ function normStep(s) {
     prio: !!s.prio,
     ideas: str(s.ideas), questions: str(s.questions), learnings: str(s.learnings),
     process: str(s.process),
+    deps: Array.isArray(s.deps) ? s.deps.filter(x => typeof x === 'string') : [],   // Voraussetzungen: IDs von Schritten, die vorher erledigt sein sollen
     attachments: Array.isArray(s.attachments) ? s.attachments.filter(a => a && typeof a === 'object' && a.id) : [],
     worked: Number.isFinite(+s.worked) && +s.worked > 0 ? +s.worked : 0,   // bereits gearbeitete Minuten (vor einer Unterbrechung)
     pauses: Array.isArray(s.pauses) ? s.pauses.filter(x => x && !isNaN(Date.parse(x.from))).map(x => ({ from: x.from, to: x.to && !isNaN(Date.parse(x.to)) ? x.to : null })) : [],
@@ -298,12 +299,21 @@ function recompute() {
   ACTIVE_END = Math.max(0, ...leavesOf(p.steps).filter(s => s.status === 'doing').map(doingEnd));
   schedule(p.steps, Date.parse(p.start));
   number(p.steps, '');
+  for (const s of STEPS.values()) if (s.deps && s.deps.length) s.deps = s.deps.filter(d => STEPS.has(d) && d !== s.id);   // gelöschte Schritte entfernen
+}
+function reidAll(list) {
+  const map = new Map();
+  const walk = s => { const o = s.id; s.id = uid(); map.set(o, s.id); s.children.forEach(walk); };
+  const fix = s => { s.deps = (s.deps || []).map(d => map.get(d)).filter(Boolean); s.children.forEach(fix); };
+  list.forEach(walk); list.forEach(fix);
+  return map;
 }
 function leavesOf(steps, out = []) { for (const s of steps) { if (s.children.length) leavesOf(s.children, out); else out.push(s); } return out; }
 function allOf(steps, out = []) { for (const s of steps) { out.push(s); allOf(s.children, out); } return out; }
-// gesperrt: Schritt stammt aus einer früheren Schleife oder das Projekt ist archiviert
-const isLocked = s => !!(proj().archived || (s && s.loopAdded < proj().loop));
 const readOnly = () => !!(proj().archived || proj().finished);   // archiviert oder Lauf abgeschlossen: nur lesen
+// Schritte aus früheren Schleifen sind nur gekennzeichnet (der Bericht dieser Schleife ist gespeichert), die aktuelle Schleife ist voll bearbeitbar
+const isOld = s => !!(s && s.loopAdded < proj().loop);
+const isLocked = s => readOnly();
 function locate(id, steps = proj().steps) {
   for (let i = 0; i < steps.length; i++) {
     if (steps[i].id === id) return { step: steps[i], list: steps, index: i };
@@ -330,6 +340,9 @@ const ICON_STOP = '<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="
 const ICON_TOPROC = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="7.5" y="2" width="5" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.5 7h5M4.5 4.8 6.7 7 4.5 9.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_PAUSE_S = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5v7M8 2.5v7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 const ICON_MORE = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="3" cy="7" r="1.2" fill="currentColor"/><circle cx="7" cy="7" r="1.2" fill="currentColor"/><circle cx="11" cy="7" r="1.2" fill="currentColor"/></svg>';
+function stepDone(s) { return s.children.length ? s.children.every(stepDone) : s.status === 'done'; }
+function openDeps(s) { return (s.deps || []).map(d => STEPS.get(d)).filter(x => x && !stepDone(x)); }
+const ICON_DEP = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 3h3.5a2 2 0 0 1 2 2v1M10.5 9H7M8.8 7.2 10.5 9 8.8 10.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 function attachCount(s) { return window.LF && LF.docs && LF.docs.attachCount ? LF.docs.attachCount(s) : (s.attachments || []).length; }
 function chipsHTML(s) {
   const t = T.get(s.id);
@@ -338,6 +351,10 @@ function chipsHTML(s) {
   const out = [];
   if (measured) out.push(`<span class="chip c-dur chip-real" title="Tatsächlich gebraucht">${fmtDur(real)} gebraucht</span>`, `<span class="chip">geplant ${fmtDur(s.dur)}</span>`);
   else out.push(`<span class="chip c-dur">${fmtDur(real)}</span>`);
+  if ((s.deps || []).length) {
+    const wait = openDeps(s);
+    out.push(wait.length ? `<span class="chip chip-dep wait" title="Diese Schritte sind noch nicht erledigt">${ICON_DEP}wartet auf ${wait.map(x => LABELS.get(x.id)).join(', ')}</span>` : `<span class="chip chip-dep" title="Alle Voraussetzungen erledigt">${ICON_DEP}benötigt ${s.deps.map(d => LABELS.get(d)).filter(Boolean).join(', ')} ✓</span>`);
+  }
   if (s.status === 'paused') out.push(`<span class="chip chip-paused">Unterbrochen · noch ${fmtDur(restDur(s))}</span>`);
   if (s.at) out.push('<span class="chip">feste Startzeit</span>');
   if (t.overlap) out.push(`<span class="chip chip-over">überschneidet sich um ${t.overlap} min</span>`);
@@ -350,7 +367,7 @@ function chipsHTML(s) {
     const n = countLines(s[k]);
     if (n) out.push(`<span class="chip chip-${k}"><i></i>${n} ${n === 1 ? one : many}</span>`);
   }
-  if (proj().loop > 1 && s.loopAdded < proj().loop) out.push(`<span class="chip chip-lock" title="Aus einer früheren Schleife, Inhalt gesperrt">${ICON_LOCK}Schleife ${s.loopAdded}</span>`);
+  if (proj().loop > 1 && s.loopAdded < proj().loop) out.push(`<span class="chip chip-old" title="Aus einer früheren Schleife (deren Bericht ist gespeichert)">aus Schleife ${s.loopAdded}</span>`);
   else if (proj().loop > 1) out.push(`<span class="chip chip-new">neu in Schleife ${s.loopAdded}</span>`);
   return out.join('');
 }
@@ -376,16 +393,15 @@ function zoomTabHTML(s) {
 function stepHTML(s) {
   const lab = LABELS.get(s.id);
   const kids = s.children.length;
-  const locked = isLocked(s);
+  const locked = isLocked(s), old = isOld(s);
   const ro = locked ? ' readonly' : '';
-  const cls = ['step', 'is-' + s.status, s.prio && 'is-prio', kids && 'has-kids', locked && 'is-locked', ui.path.includes(s.id) && 'sub-open'].filter(Boolean).join(' ');
+  const cls = ['step', 'is-' + s.status, s.prio && 'is-prio', kids && 'has-kids', old && 'is-old', ui.path.includes(s.id) && 'sub-open'].filter(Boolean).join(' ');
   return `<article class="${cls}" data-id="${s.id}">
   <div class="time"><span class="t-date"></span><span class="t-start"></span><span class="t-end"></span></div>
   <div class="node"><button class="sq" data-act="cycle" title="Klicken: Status wechseln (${STATUS[s.status]})${locked ? '' : ' · Ziehen: verschieben'}" aria-label="Schritt ${lab}, ${STATUS[s.status]}. Klicken wechselt den Status.">${lab}</button></div>
   <div class="body">
     <div class="compact">${compactHTML(s)}</div>
     <div class="expanded">
-      ${locked && !readOnly() ? `<p class="lock-note">${ICON_LOCK} Aus Schleife ${s.loopAdded}: Titel, Beschreibung und Prozessbeschreibung sind gesperrt. Notizen, Status und Zwischenschritte gehen.</p>` : ''}
       <textarea class="e-title" data-f="title" rows="1" placeholder="Titel des Schritts" aria-label="Titel"${ro}>${esc(s.title)}</textarea>
       <textarea class="e-desc" data-f="desc" rows="1" placeholder="Beschreibung: Was passiert in diesem Schritt?" aria-label="Beschreibung"${ro}>${esc(s.desc)}</textarea>
       <div class="notes">${NOTES.map(([k, h, , , ph]) => `
@@ -404,6 +420,7 @@ function stepHTML(s) {
         </div>
         <div class="tool-row tool-icons-row">
         ${s.status === 'doing' ? `<button class="pill ic-l" data-act="break" title="Pause (B): Zeit hält an">${ICON_PAUSE_S}<span>${state.brk ? 'Fortsetzen' : 'Pause'}</span></button><button class="pill ic-l" data-act="interrupt" title="Unterbrechen mit Zwischenstand">${ICON_STOP}<span>Unterbrechen</span></button>` : ''}
+        ${readOnly() ? '' : `<button class="pill ic-l" data-act="deps" title="Voraussetzungen: Welche Schritte müssen vorher erledigt sein?">${ICON_DEP}<span>${s.deps.length ? 'Voraussetzung · ' + s.deps.length : 'Voraussetzung'}</span></button>`}
         ${proj().role === 'run' && !readOnly() ? `<button class="pill icon" data-act="to-proc" title="${partnerOf(proj()) ? 'In Prozess übernehmen' : 'Prozess parallel gestalten'}" aria-label="${partnerOf(proj()) ? 'In Prozess übernehmen' : 'Prozess parallel gestalten'}">${ICON_TOPROC}</button>` : ''}
         <span class="tool-icons">
         <button class="pill icon" data-act="side-docs" aria-label="Unterlagen" title="Unterlagen: Anhänge, Links, Dokumente">${ICON_CLIP}</button>
@@ -795,7 +812,7 @@ function updateNav() {
 function moveStep(id, dir) {
   const L = locate(id);
   if (!L) return;
-  if (isLocked(L.step)) { toast('Gesperrt: Schritt aus einer früheren Schleife.'); haptic('error'); return; }
+  if (isLocked(L.step)) { toast('Nur lesen.'); haptic('error'); return; }
   const j = L.index + dir;
   if (j < 0 || j >= L.list.length) { haptic('error'); return; }
   mutate(() => { L.list.splice(L.index, 1); L.list.splice(j, 0, L.step); });
@@ -805,7 +822,7 @@ function moveStep(id, dir) {
 function deleteStep(id) {
   const L = locate(id);
   if (!L) return;
-  if (isLocked(L.step)) { toast('Gesperrt: Schritt aus einer früheren Schleife.'); haptic('error'); return; }
+  if (isLocked(L.step)) { toast('Nur lesen.'); haptic('error'); return; }
   const before = snap();
   mutate(() => L.list.splice(L.index, 1));
   if (ui.focus && ui.focus.id === id) ui.focus = null;
@@ -837,20 +854,37 @@ function cycle(id, el) {
   const s = STEPS.get(id);
   if (!s) return;
   const next = NEXT[s.status];
-  let others = [];
-  mutate(() => { if (next === 'doing') others = startStep(s); else applyStatus(s, next); });
-  if (others.length) toast(`${others.map(o => LABELS.get(o.id)).join(', ')} unterbrochen`, { label: 'Zwischenstand', fn: () => addLog(others[0].id) });
-  haptic(next === 'done' ? 'done' : 'tap');
-  bump(document.querySelector(`.step[data-id="${id}"] .sq`) || el);
+  const run = () => {
+    let others = [];
+    mutate(() => { if (next === 'doing') others = startStep(s); else applyStatus(s, next); });
+    if (others.length) toast(`${others.map(o => LABELS.get(o.id)).join(', ')} unterbrochen`, { label: 'Zwischenstand', fn: () => addLog(others[0].id) });
+    haptic(next === 'done' ? 'done' : 'tap');
+    bump(document.querySelector(`.step[data-id="${id}"] .sq`) || el);
+  };
+  if (next === 'doing') startGuard(s, run); else run();
+}
+// Vor dem Start prüfen, ob Voraussetzungen offen sind
+function startGuard(s, go) {
+  const wait = openDeps(s);
+  if (!wait.length) { go(); return; }
+  haptic('error');
+  openDialog({
+    title: 'Voraussetzung noch offen',
+    body: `<p><b>${esc(LABELS.get(s.id) + ' ' + (s.title || 'Ohne Titel'))}</b> braucht zuerst:</p><ul class="dep-open">${wait.map(x => `<li><span class="pk-sq">${esc(LABELS.get(x.id))}</span>${esc(x.title || 'Ohne Titel')}<em>${STATUS[x.status] || ''}</em></li>`).join('')}</ul>`,
+    actions: [{ label: 'Abbrechen' }, { label: 'Trotzdem starten', cls: 'primary', fn: () => go() }],
+  });
 }
 function setStatus(id, v) {
   const s = STEPS.get(id);
   if (!s || s.status === v) return;
-  let others = [];
-  mutate(() => { if (v === 'doing') others = startStep(s); else applyStatus(s, v); });
-  if (others.length) toast(`${others.map(o => LABELS.get(o.id)).join(', ')} unterbrochen`, { label: 'Zwischenstand', fn: () => addLog(others[0].id) });
-  haptic(v === 'done' ? 'done' : 'tap');
-  bump(document.querySelector(`.step[data-id="${id}"] .sq`));
+  const run = () => {
+    let others = [];
+    mutate(() => { if (v === 'doing') others = startStep(s); else applyStatus(s, v); });
+    if (others.length) toast(`${others.map(o => LABELS.get(o.id)).join(', ')} unterbrochen`, { label: 'Zwischenstand', fn: () => addLog(others[0].id) });
+    haptic(v === 'done' ? 'done' : 'tap');
+    bump(document.querySelector(`.step[data-id="${id}"] .sq`));
+  };
+  if (v === 'doing') startGuard(s, run); else run();
 }
 function togglePrio(id) {
   const s = STEPS.get(id);
@@ -881,9 +915,8 @@ function createProject() {
 function duplicateProject() {
   const src = proj();
   const copy = normProject(JSON.parse(JSON.stringify(src)));
-  const reid = s => { s.id = uid(); s.children.forEach(reid); };
   copy.id = uid(); copy.title = src.title + ' (Kopie)'; copy.created = Date.now();
-  copy.steps.forEach(reid);
+  reidAll(copy.steps);
   pushHistory();
   state.projects.push(copy);
   state.activeId = copy.id; ui.focus = null; ui.path = []; ui.trail = [];
@@ -937,8 +970,7 @@ function importData(file) {
     const before = snap();
     pushHistory();
     const ids = new Set(state.projects.map(p => p.id));
-    const reid = s => { s.id = uid(); s.children.forEach(reid); };
-    const added = list.map(normProject).map(p => { if (ids.has(p.id)) p.id = uid(); p.steps.forEach(reid); return p; });
+    const added = list.map(normProject).map(p => { if (ids.has(p.id)) p.id = uid(); reidAll(p.steps); return p; });
     state.projects.push(...added);
     if (Array.isArray(data.folders)) data.folders.map(normFolder).forEach(f => { if (!folderById(f.id)) state.folders.push(f); });
     state.activeId = added[0].id; ui.focus = null; ui.path = []; ui.trail = [];
@@ -971,6 +1003,7 @@ function renderProjMenu() {
     + '<button class="m-item" data-act="proj-new">Neues Projekt</button>'
     + `<button class="m-item" data-act="proj-version">Neue Prozessversion <span class="m-sub">archiviert v${p.version}</span></button>`
     + (p.role === 'run' ? `<button class="m-item" data-act="proj-pair">${partnerOf(p) ? 'Zum Prozess-Entwurf' : 'Prozess parallel gestalten …'} <span class="m-sub">W</span></button>` : (partnerOf(p) ? '<button class="m-item" data-act="proj-pair">Zur Ausführung <span class="m-sub">W</span></button>' : ''))
+    + '<button class="m-item" data-act="merge-proj">In anderes Projekt einfügen …</button>'
     + '<button class="m-item" data-act="proj-dup">Projekt duplizieren</button>'
     + '<button class="m-item danger" data-act="proj-del">Projekt löschen …</button>';
 }
@@ -1167,7 +1200,7 @@ document.addEventListener('pointerdown', e => {
   const sq = e.target.closest('.axis .sq');
   if (!sq || e.button !== 0) return;
   const st = STEPS.get(sq.closest('.step').dataset.id);
-  if (!st || isLocked(st)) return;   // gesperrte Schritte (frühere Schleife) bleiben an ihrem Platz
+  if (!st || isLocked(st)) return;   // nur lesen: kein Verschieben
   drag.id = st.id;
   drag.sx = drag.px = e.clientX; drag.sy = drag.py = e.clientY; drag.on = false;
 });
@@ -1310,8 +1343,9 @@ function currentLeaf(now) {
     || null;
 }
 function nextLeaf(now, exceptId) {
-  return leaves(proj().steps).filter(s => (s.status === 'open' || s.status === 'paused') && s.id !== exceptId && T.get(s.id).start > now - MIN)
-    .sort((a, b) => T.get(a.id).start - T.get(b.id).start)[0] || null;
+  const c = leaves(proj().steps).filter(s => (s.status === 'open' || s.status === 'paused') && s.id !== exceptId && T.get(s.id).start > now - MIN)
+    .sort((a, b) => T.get(a.id).start - T.get(b.id).start);
+  return c.find(s => !openDeps(s).length) || c[0] || null;   // Schritte mit erfüllten Voraussetzungen zuerst
 }
 function milestoneTimes(s) {
   const t = T.get(s.id), dur = (t.plan - t.start) / MIN;
@@ -1466,12 +1500,14 @@ function coachAct(act, id, el) {
     return;
   }
   if (act === 'coach-start') {
-    const before = snap();
-    mutate(() => startStep(s));
-    jumpToNow(true);
-    haptic('done'); coachAlert = null;
-    toast(`${LABELS.get(s.id)} läuft · ${s.dur} min geplant`, { label: 'Rückgängig', fn: undoTo(before) });
-    updateCoach();
+    startGuard(s, () => {
+      const before = snap();
+      mutate(() => startStep(s));
+      jumpToNow(true);
+      haptic('done'); coachAlert = null;
+      toast(`${LABELS.get(s.id)} läuft · ${s.dur} min geplant`, { label: 'Rückgängig', fn: undoTo(before) });
+      updateCoach();
+    });
     return;
   }
   if (act === 'coach-done') {
@@ -1719,7 +1755,7 @@ function showLoop() {
   openDialog({
     title: p.finished ? 'Lauf abgeschlossen' : `Schleife ${p.loop} · ${LOOPS[p.loop].name}`,
     body: `<ol class="loop-list">${L(1)}${L(2)}${L(3)}</ol>
-      <p class="muted-s">${p.finished ? 'Alle drei Schleifen sind archiviert. Für den nächsten Durchgang erstellst du eine neue Prozessversion.' : `Erledigt: ${tl.done} von ${tl.n}. ${last ? 'Abschließen archiviert den Lauf.' : `Nächste Schleife: Schritte aus Schleife ${p.loop} werden gesperrt (Inhalt), der Status beginnt neu. Du kannst Schritte dazwischen einfügen und aus Ideen und Fragen neue Schritte bauen.`}`}</p>`,
+      <p class="muted-s">${p.finished ? 'Alle drei Schleifen sind archiviert. Für den nächsten Durchgang erstellst du eine neue Prozessversion.' : `Erledigt: ${tl.done} von ${tl.n}. ${last ? 'Abschließen archiviert den Lauf.' : `Nächste Schleife: Der Status beginnt neu, Schritte bleiben bearbeitbar. Der Bericht dieser Schleife wird gespeichert. Aus Ideen und Fragen baust du neue Schritte.`}`}</p>`,
     actions: p.finished || readOnly()
       ? [{ label: 'Bericht', fn: () => showReport(p.runs.length - 1) }, { label: 'Neue Prozessversion', cls: 'primary', fn: newVersion }]
       : [{ label: 'Bericht', fn: () => showReport(-1) }, { label: last ? 'Lauf abschließen' : `Schleife ${p.loop + 1} starten`, cls: 'primary', fn: finishLoop }],
@@ -1794,7 +1830,7 @@ function timelineHTML() {
       <div class="pr-num">${LABELS.get(s.id)}</div>
       <div class="pr-main"><h3>${esc(s.title || 'Ohne Titel')}<em>${STATUS[s.status]}</em></h3>
         ${s.desc ? `<p>${esc(s.desc)}</p>` : ''}
-        <p class="pr-meta">${s.status === 'done' && s.startedAt && s.doneAt ? `gebraucht ${fmtDur(real)} · geplant ${fmtDur(s.dur)}` : `Dauer ${fmtDur(real)}`}${s.prio ? ' · Priorität' : ''}</p>
+        <p class="pr-meta">${s.status === 'done' && s.startedAt && s.doneAt ? `gebraucht ${fmtDur(real)} · geplant ${fmtDur(s.dur)}` : `Dauer ${fmtDur(real)}`}${s.prio ? ' · Priorität' : ''}${(s.deps || []).length ? ' · benötigt ' + s.deps.map(d => LABELS.get(d)).filter(Boolean).join(', ') : ''}</p>
         ${notes}${s.log.length ? `<div class="pr-note"><b>Zwischenstand</b>${s.log.map(x => `<span>${esc(hm(Date.parse(x.at)))} · ${esc(x.text)}</span>`).join('')}</div>` : ''}
         ${s.process ? `<div class="pr-proc">${window.LF && LF.docs && LF.docs.processHTML ? LF.docs.processHTML(s) : ''}</div>` : ''}
       </div></section>` + s.children.map(c => row(c, depth + 1)).join('');
@@ -1821,8 +1857,7 @@ function newVersion() {
   const folder = folderOf(src);
   const maxV = Math.max(...state.projects.filter(x => folderOf(x) === folder && x.role === src.role).map(x => x.version));
   const copy = normProject(JSON.parse(JSON.stringify(src)));
-  const reid = s => { s.id = uid(); s.children.forEach(reid); };
-  copy.steps.forEach(reid);
+  reidAll(copy.steps);
   Object.assign(copy, { id: uid(), version: maxV + 1, folder, loop: 1, runs: [], finished: null, archived: false, loopStartedAt: null, start: roundedNow(15).toISOString(), created: Date.now(), inbox: [] });
   allOf(copy.steps).forEach(s => Object.assign(s, { status: 'open', startedAt: null, doneAt: null, worked: 0, pauses: [], log: [], ideas: '', questions: '', learnings: '', loopAdded: 1, at: null }));
   pushHistory();
@@ -1859,7 +1894,13 @@ function createPartner(copySteps) {
   const p = proj();
   const np = normProject(newProject(`${p.title || 'Ohne Titel'} · Prozess`));
   Object.assign(np, { role: 'process', link: p.id, folder: folderOf(p), folderId: p.folderId });
-  if (copySteps && p.steps.length) np.steps = p.steps.map(cloneForProcess);
+  if (copySteps && p.steps.length) {
+    const arr = p.steps.map(s => normStep(JSON.parse(JSON.stringify(s))));
+    allOf(arr).forEach(x => { x.fromId = x.id; });
+    reidAll(arr);
+    allOf(arr).forEach(x => Object.assign(x, { status: 'open', startedAt: null, doneAt: null, worked: 0, pauses: [], log: [], ideas: '', questions: '', learnings: '', loopAdded: 1, at: null }));
+    np.steps = arr;
+  }
   pushHistory();
   p.link = np.id; p.folder = folderOf(p);
   state.projects.push(np);
@@ -2022,6 +2063,88 @@ function coachMenu(anchor, id) {
   ]);
 }
 
+
+/* ---------- Voraussetzungen ---------- */
+function depClosure(s, seen = new Set()) {
+  for (const d of s.deps || []) if (!seen.has(d)) { seen.add(d); const x = STEPS.get(d); if (x) depClosure(x, seen); }
+  return seen;
+}
+function pathTo(id, list = proj().steps, trail = []) {
+  for (const s of list) { if (s.id === id) return trail.concat(s.id); const r = pathTo(id, s.children, trail.concat(s.id)); if (r) return r; }
+  return null;
+}
+function depCandidates(s) {
+  const desc = new Set(allOf(s.children).map(x => x.id));
+  const anc = new Set((pathTo(s.id) || []).slice(0, -1));
+  return allOf(proj().steps).filter(x => x !== s && !desc.has(x.id) && !anc.has(x.id) && !depClosure(x).has(s.id));   // keine Kreise
+}
+function depsDialog(id) {
+  const s = STEPS.get(id);
+  if (!s || readOnly()) return;
+  const cands = depCandidates(s);
+  if (!cands.length) { toast('Es gibt keinen anderen Schritt, der Voraussetzung sein kann.'); return; }
+  openDialog({
+    title: 'Voraussetzungen',
+    body: `<p><b>${esc(LABELS.get(s.id) + ' ' + (s.title || 'Ohne Titel'))}</b> soll erst starten, wenn diese Schritte erledigt sind:</p>
+      <div class="ts-list">${cands.map(x => `<label class="ts-i dp-i d${Math.min(LABELS.get(x.id).split('.').length - 1, 3)}"><input type="checkbox" data-d="${x.id}"${(s.deps || []).includes(x.id) ? ' checked' : ''}><span class="pk-sq">${esc(LABELS.get(x.id))}</span><span class="dp-t">${esc(x.title || 'Ohne Titel')}</span><em>${STATUS[x.status] || ''}</em></label>`).join('')}</div>
+      <p class="muted-s">Beim Starten fragt die App nach, wenn eine Voraussetzung noch offen ist. „Als Nächstes“ schlägt Schritte mit erfüllten Voraussetzungen zuerst vor.</p>`,
+    actions: [{ label: 'Abbrechen' }, { label: 'Speichern', cls: 'primary', keep: true, fn: () => {
+      const pick = $$('#dialog input[data-d]:checked').map(x => x.dataset.d);
+      closeDialog();
+      mutate(() => { s.deps = pick; });
+      haptic('done');
+    } }],
+  });
+}
+
+/* ---------- Projekt als Teilschritte in ein anderes einfügen ---------- */
+function stepLabelsOf(p) {
+  const out = [];
+  (function w(list, prefix) { list.forEach((s, i) => { const lab = prefix + (i + 1); out.push({ id: s.id, label: lab, title: s.title || 'Ohne Titel' }); w(s.children, lab + '.'); }); })(p.steps, '');
+  return out;
+}
+function mergeProject(srcId) {
+  const src = state.projects.find(p => p.id === srcId);
+  if (!src) return;
+  const targets = state.projects.filter(p => p.id !== src.id && !p.archived);
+  if (!targets.length) { toast('Es gibt kein anderes Projekt, in das eingefügt werden kann.'); haptic('error'); return; }
+  if (!src.steps.length) { toast('Dieses Projekt hat noch keine Schritte.'); haptic('error'); return; }
+  const optsFor = p => '<option value="">Am Ende als Hauptschritte</option>' + stepLabelsOf(p).map(x => `<option value="${x.id}">${esc(x.label + '   ' + x.title)}</option>`).join('');
+  const first = targets.find(p => p.id === state.activeId) || targets[0];
+  openDialog({
+    title: 'In anderes Projekt einfügen',
+    body: `<p>Die ${src.steps.length} Schritt${src.steps.length === 1 ? '' : 'e'} von <b>${esc(src.title || 'Ohne Titel')}</b> werden <b>Teilschritte</b> eines Schritts im Zielprojekt.</p>
+      <label class="mg-l"><span>Zielprojekt</span><select class="sel" id="mgProj">${targets.map(p => `<option value="${p.id}"${p === first ? ' selected' : ''}>${esc(p.title || 'Ohne Titel')}${p.role === 'process' ? ' · Entwurf' : ''}${p.version > 1 ? ' · v' + p.version : ''}</option>`).join('')}</select></label>
+      <label class="mg-l"><span>Wird Teil von Schritt</span><select class="sel" id="mgStep">${optsFor(first)}</select></label>
+      <label class="ts-i ts-opt"><input type="checkbox" id="mgArch" checked><span>Original danach archivieren</span></label>
+      <p class="muted-s">Ablauf, Dauer, Prozessbeschreibung und Anhänge bleiben. Status, Notizen und Zwischenstände beginnen neu. Das Original bleibt lesbar im Archiv. ⌘Z macht alles rückgängig.</p>`,
+    actions: [{ label: 'Abbrechen' }, { label: 'Einfügen', cls: 'primary', keep: true, fn: () => {
+      const tid = $('#mgProj').value, sid = $('#mgStep').value, arch = $('#mgArch').checked;
+      closeDialog();
+      const tp = state.projects.find(p => p.id === tid);
+      if (!tp) return;
+      const before = snap();
+      pushHistory();
+      const arr = src.steps.map(s => normStep(JSON.parse(JSON.stringify(s))));
+      reidAll(arr);
+      allOf(arr).forEach(x => Object.assign(x, { status: 'open', startedAt: null, doneAt: null, worked: 0, pauses: [], log: [], ideas: '', questions: '', learnings: '', loopAdded: tp.loop, at: null }));
+      if (sid) { const L = locate(sid, tp.steps); if (L) L.step.children.push(...arr); else tp.steps.push(...arr); }
+      else tp.steps.push(...arr);
+      if (arch) { src.folder = folderOf(src); src.archived = true; }
+      state.activeId = tp.id; ui.focus = null; ui.trail = []; ui.path = [];
+      closeHome();
+      save(); render();
+      ui.path = sid ? (pathTo(sid) || []) : []; ui.trail = ui.path.slice();
+      render(); haptic('done');
+      toast(`${arr.length} Schritt${arr.length === 1 ? '' : 'e'} eingefügt`, { label: 'Rückgängig', fn: undoTo(before) });
+    } }],
+  });
+  setTimeout(() => {
+    const sp = $('#mgProj');
+    if (sp) sp.addEventListener('change', () => { const t = state.projects.find(p => p.id === sp.value); $('#mgStep').innerHTML = t ? optsFor(t) : ''; });
+  }, 30);
+}
+
 /* ---------- Ideen und Fragen zu Schritten ---------- */
 function notesToSteps(id, field) {
   const s = STEPS.get(id);
@@ -2150,6 +2273,7 @@ function procMenu(anchor, key) {
   const items = procItems(key, fid);
   openPop(anchor, [
     { label: 'Öffnen', act: 'open-pid', id: (processesIn(fid).find(g => g.key === key) || {}).main?.id },
+    { label: 'Als Teilschritte in anderes Projekt …', act: 'merge-pid', id: (processesIn(fid).find(g => g.key === key) || {}).main?.id },
     { sep: true },
     ...(state.folders || []).filter(f => f.id !== fid).map(f => ({ label: 'Verschieben nach ' + f.name, act: 'proc-move', id: key + '\u0001' + f.id })),
     fid !== NONE && { label: 'Aus dem Ordner nehmen', act: 'proc-move', id: key + '\u0001' + NONE },
@@ -2235,6 +2359,9 @@ function handleAct(act, el) {
   switch (act) {
     case 'cycle': cycle(id, el); break;
     case 'card-menu': cardMenu(el, id); break;
+    case 'deps': depsDialog(id); break;
+    case 'merge-proj': closeMenus(); mergeProject(proj().id); break;
+    case 'merge-pid': mergeProject(id); break;
     case 'home': openHome(); break;
     case 'home-close': closeHome(); break;
     case 'home-folder': ui.home.folder = el.dataset.id || null; renderHome(); haptic('soft'); break;
