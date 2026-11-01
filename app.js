@@ -4,8 +4,11 @@
 /* ---------- Grundlagen ---------- */
 const KEY = 'zeitachse.v1';
 const MIN = 60000;
-const STATUS = { open: 'Offen', doing: 'In Arbeit', done: 'Erledigt' };
-const NEXT = { open: 'doing', doing: 'done', done: 'open' };
+const STATUS = { open: 'Offen', doing: 'In Arbeit', done: 'Erledigt', paused: 'Unterbrochen' };
+const SEG = ['open', 'doing', 'done'];  // Auswahl in der Fokus-Karte; „Unterbrochen“ entsteht über „Unterbrechen“
+const NEXT = { open: 'doing', doing: 'done', done: 'open', paused: 'doing' };
+// Schleifen: 1 Speedrun, 2 Fragen & Ideen nachgehen, 3 Qualitätscheck & Abgabe (Akzentfarbe je Schleife in styles.css)
+const LOOPS = { 1: { name: 'Speedrun', hint: 'Einmal schnell durch. Ideen und Fragen nur notieren.' }, 2: { name: 'Fragen & Ideen', hint: 'Ideen und Fragen nachgehen, fehlende Schritte ergänzen.' }, 3: { name: 'Qualitätscheck & Abgabe', hint: 'Prüfen, abrunden, abgeben.' } };
 // [Feld, Überschrift, Einzahl, Mehrzahl, Platzhalter]
 const NOTES = [
   ['ideas', 'Ideen', 'Idee', 'Ideen', 'Was könnte man noch machen?'],
@@ -38,11 +41,12 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const roundedNow = (offsetMin = 0) => { const d = new Date(); d.setSeconds(0, 0); d.setMinutes(Math.floor(d.getMinutes() / 15) * 15 + offsetMin); return d; };
 
 /* ---------- Datenmodell ---------- */
+function curLoop() { try { return (typeof state !== 'undefined' && state && proj() && proj().loop) || 1; } catch (e) { return 1; } }
 function newStep(p) {
-  return Object.assign({ id: uid(), title: '', desc: '', at: null, dur: 30, status: 'open', startedAt: null, doneAt: null, prio: false, ideas: '', questions: '', learnings: '', children: [] }, p);
+  return Object.assign({ id: uid(), title: '', desc: '', at: null, dur: 30, status: 'open', startedAt: null, doneAt: null, prio: false, ideas: '', questions: '', learnings: '', process: '', attachments: [], worked: 0, pauses: [], log: [], loopAdded: curLoop(), children: [] }, p);
 }
 function newProject(title) {
-  return { id: uid(), title: title || 'Neues Projekt', start: roundedNow(15).toISOString(), target: null, foldDone: true, inbox: [], created: Date.now(), steps: [newStep()] };
+  return normProject({ id: uid(), title: title || 'Neues Projekt', start: roundedNow(15).toISOString(), target: null, foldDone: true, inbox: [], created: Date.now(), steps: [newStep()] });
 }
 function normStep(s) {
   s = s && typeof s === 'object' ? s : {};
@@ -56,6 +60,13 @@ function normStep(s) {
     doneAt: typeof s.doneAt === 'string' && !isNaN(Date.parse(s.doneAt)) ? s.doneAt : null,
     prio: !!s.prio,
     ideas: str(s.ideas), questions: str(s.questions), learnings: str(s.learnings),
+    process: str(s.process),
+    attachments: Array.isArray(s.attachments) ? s.attachments.filter(a => a && typeof a === 'object' && a.id) : [],
+    worked: Number.isFinite(+s.worked) && +s.worked > 0 ? +s.worked : 0,   // bereits gearbeitete Minuten (vor einer Unterbrechung)
+    pauses: Array.isArray(s.pauses) ? s.pauses.filter(x => x && !isNaN(Date.parse(x.from))).map(x => ({ from: x.from, to: x.to && !isNaN(Date.parse(x.to)) ? x.to : null })) : [],
+    log: Array.isArray(s.log) ? s.log.filter(x => x && typeof x.text === 'string').map(x => ({ at: str(x.at) || new Date().toISOString(), text: x.text, kind: str(x.kind) || 'zwischenstand' })) : [],
+    loopAdded: [1, 2, 3].includes(+s.loopAdded) ? +s.loopAdded : 1,
+    fromId: str(s.fromId) || null,
     children: Array.isArray(s.children) ? s.children.map(normStep) : [],
   };
 }
@@ -68,6 +79,16 @@ function normProject(p) {
     target: typeof p.target === 'string' && !isNaN(Date.parse(p.target)) ? p.target : null,
     foldDone: p.foldDone !== false,
     inbox: Array.isArray(p.inbox) ? p.inbox.filter(i => i && typeof i.text === 'string').map(i => ({ id: str(i.id) || uid(), text: i.text, at: str(i.at) || new Date().toISOString(), from: str(i.from) })) : [],
+    loop: [1, 2, 3].includes(+p.loop) ? +p.loop : 1,
+    loopStartedAt: str(p.loopStartedAt) || null,
+    runs: Array.isArray(p.runs) ? p.runs.filter(r => r && typeof r === 'object') : [],   // archivierte Schleifen
+    finished: str(p.finished) || null,
+    folder: str(p.folder),            // Prozess-Schlüssel (mehrere Versionen gehören zusammen)
+    folderId: str(p.folderId) || null, // Projektordner in der Projektverwaltung
+    version: +p.version > 0 ? Math.round(+p.version) : 1,
+    archived: !!p.archived,
+    role: p.role === 'process' ? 'process' : 'run',   // Ausführung oder Prozess-Entwurf
+    link: str(p.link) || null,        // Partner-Projekt (Ausführung ⇄ Prozess)
     created: +p.created || Date.now(),
     updatedAt: +p.updatedAt || 0,
     steps: Array.isArray(p.steps) ? p.steps.map(normStep) : [],
@@ -80,7 +101,7 @@ function seed() {
       newStep({ title: 'Einen Schritt fokussieren', dur: 15, status: 'done',
         desc: 'Klicke auf einen Schritt. Er rückt nach vorn, die Schritte darüber und darunter werden unscharf. Esc oder ein Klick daneben beendet den Fokus.',
         learnings: 'Im Fokus sind alle Felder direkt bearbeitbar.' }),
-      newStep({ title: 'Status setzen', dur: 30, status: 'doing',
+      newStep({ title: 'Status setzen', dur: 30, status: 'doing', startedAt: roundedNow(-15).toISOString(),
         desc: 'Klick auf das Quadrat mit der Nummer wechselt den Status: Offen → In Arbeit → Erledigt.' }),
       newStep({ title: 'Zwischenschritte einfügen', dur: 20,
         desc: 'Fahre mit der Maus zwischen zwei Schritte und klicke auf das Plus. Beliebig viele. Nummern und Uhrzeiten rücken automatisch nach.' }),
@@ -99,7 +120,7 @@ function seed() {
         desc: 'Alles wird automatisch in diesem Browser gespeichert. Über ··· oben rechts speicherst du eine Sicherungsdatei.' }),
     ],
   };
-  return { v: 1, projects: [p], activeId: p.id, settings: { sound: true } };
+  return { v: 1, projects: [normProject(p)], activeId: p.id, settings: { sound: true } };
 }
 
 function load() {
@@ -116,6 +137,7 @@ function load() {
 let state = load() || seed();
 state.settings = Object.assign({ sound: true, remind: true, notify: false, coachMini: false }, state.settings);
 if (!state.projects.some(p => p.id === state.activeId)) state.activeId = state.projects[0].id;
+state.folders = Array.isArray(state.folders) ? state.folders.map(normFolder) : [];
 
 let T = new Map();       // id → { start, end }
 let LABELS = new Map();  // id → "3.2"
@@ -138,7 +160,10 @@ function stamp() {
     if (known.get(p.id) !== j) { known.set(p.id, j); p.updatedAt = now; delete state.tomb[p.id]; }
   }
   for (const id of [...known.keys()]) if (!ids.has(id)) { known.delete(id); state.tomb[id] = now; }
+  const mj = JSON.stringify(state.folders || []);
+  if (knownMeta !== mj) { if (knownMeta !== null) state.metaUpdatedAt = now; knownMeta = mj; }
 }
+let knownMeta = null;
 function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
@@ -174,7 +199,10 @@ function redo() {
   if (!future.length) return;
   past.push(snap()); restore(future.pop()); haptic('soft'); toast('Wiederhergestellt');
 }
-function mutate(fn) { pushHistory(); fn(); save(); render(); }
+function mutate(fn) {
+  if (readOnly()) { toast('Archivierte Version: nur lesen.'); haptic('error'); return; }
+  pushHistory(); fn(); save(); render();
+}
 // Rückgängig für genau diese Aktion (auch wenn danach noch etwas passiert ist)
 function undoTo(before) { return () => { past.push(snap()); future = []; restore(before); haptic('soft'); toast('Wiederhergestellt'); }; }
 
@@ -209,6 +237,18 @@ const floorMin = ms => Math.floor(ms / MIN) * MIN;
 const ceilMin = ms => Math.ceil(ms / MIN) * MIN;
 // Plan folgt der Wirklichkeit: Laufende Schritte wachsen bis jetzt, Offenes beginnt frühestens jetzt,
 // Erledigtes endet zum echten Zeitpunkt. Feste Startzeiten bleiben stehen.
+// Pausen eines Schritts (Essenspause usw.) in ms, laufende Pause zählt bis jetzt
+function pausedMs(s, now = Date.now()) {
+  return (s.pauses || []).reduce((sum, x) => sum + Math.max(0, (x.to ? Date.parse(x.to) : now) - Date.parse(x.from)), 0);
+}
+// Restdauer in Minuten (nach Unterbrechung zählt nur, was noch fehlt)
+const restDur = s => Math.max(0, (s.dur || 0) - (s.worked || 0));
+let ACTIVE_END = 0;   // Ende der laufenden Aufgabe: offene Schritte reihen sich dahinter ein
+function doingEnd(s) {
+  const st = s.startedAt ? Date.parse(s.startedAt) : NaN;
+  if (isNaN(st)) return 0;
+  return Math.max(st + restDur(s) * MIN + pausedMs(s), ceilMin(Date.now()));
+}
 function schedule(steps, startMs) {
   const now = floorMin(Date.now());
   let cur = startMs;
@@ -236,11 +276,12 @@ function schedule(steps, startMs) {
         plan = st + dur;
       } else if (s.status === 'doing') {
         st = isNaN(started) ? planned : started;
-        plan = st + dur;
+        plan = st + restDur(s) * MIN + pausedMs(s);
         en = Math.max(plan, ceilMin(Date.now()));
       } else {
-        st = isNaN(fixed) ? Math.max(cur, now) : fixed;
-        en = plan = st + dur;
+        // offen oder unterbrochen: frühestens jetzt und erst nach der laufenden Aufgabe
+        st = isNaN(fixed) ? Math.max(cur, now, ACTIVE_END) : fixed;
+        en = plan = st + restDur(s) * MIN;
       }
     }
     T.set(s.id, { start: st, end: en, plan, overlap });
@@ -254,9 +295,15 @@ function number(steps, prefix) {
 function recompute() {
   const p = proj();
   T = new Map(); LABELS = new Map(); STEPS = new Map();
+  ACTIVE_END = Math.max(0, ...leavesOf(p.steps).filter(s => s.status === 'doing').map(doingEnd));
   schedule(p.steps, Date.parse(p.start));
   number(p.steps, '');
 }
+function leavesOf(steps, out = []) { for (const s of steps) { if (s.children.length) leavesOf(s.children, out); else out.push(s); } return out; }
+function allOf(steps, out = []) { for (const s of steps) { out.push(s); allOf(s.children, out); } return out; }
+// gesperrt: Schritt stammt aus einer früheren Schleife oder das Projekt ist archiviert
+const isLocked = s => !!(proj().archived || (s && s.loopAdded < proj().loop));
+const readOnly = () => !!(proj().archived || proj().finished);   // archiviert oder Lauf abgeschlossen: nur lesen
 function locate(id, steps = proj().steps) {
   for (let i = 0; i < steps.length; i++) {
     if (steps[i].id === id) return { step: steps[i], list: steps, index: i };
@@ -274,18 +321,37 @@ function axisSteps(key) { return key === 'sub' ? (subParent() || { children: [] 
 function axisEl(key) { return key === 'sub' ? $('#subAxis') : $('#mainAxis'); }
 
 /* ---------- Darstellung ---------- */
+const ICON_LAYERS = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5 10.5 4 6 6.5 1.5 4Z M1.5 6.5 6 9l4.5-2.5" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>';
+const ICON_LOCK = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="4.5" width="6" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1"/><path d="M3.3 4.5V3.2a1.7 1.7 0 0 1 3.4 0v1.3" fill="none" stroke="currentColor" stroke-width="1"/></svg>';
+const ICON_CLIP = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M8.5 4.5 5 8a1.4 1.4 0 0 1-2-2l4-4a2.3 2.3 0 0 1 3.3 3.3L6.2 9.4" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
+const ICON_DOC = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 1.8h5.2L11 4.6v7.6H3Z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><path d="M5.2 9.6 9.6 5.2l1.2 1.2-4.4 4.4H5.2Z" fill="currentColor" stroke="none"/></svg>';
+const ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><path d="M2 3.5h9M5 3.5V2h3v1.5M3.2 3.5l.6 7.5h5.4l.6-7.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+const ICON_STOP = '<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><path d="M3 11V2.2h6.2L8 4.4l1.2 2.2H3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+const ICON_TOPROC = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="7.5" y="2" width="5" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.5 7h5M4.5 4.8 6.7 7 4.5 9.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_PAUSE_S = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5v7M8 2.5v7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const ICON_MORE = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="3" cy="7" r="1.2" fill="currentColor"/><circle cx="7" cy="7" r="1.2" fill="currentColor"/><circle cx="11" cy="7" r="1.2" fill="currentColor"/></svg>';
+function attachCount(s) { return window.LF && LF.docs && LF.docs.attachCount ? LF.docs.attachCount(s) : (s.attachments || []).length; }
 function chipsHTML(s) {
   const t = T.get(s.id);
-  const out = [`<span class="chip c-dur">${fmtDur((t.end - t.start) / MIN)}</span>`];
+  const real = Math.round((t.end - t.start) / MIN);
+  const measured = !s.children.length && s.status === 'done' && s.doneAt && s.startedAt;
+  const out = [];
+  if (measured) out.push(`<span class="chip c-dur chip-real" title="Tatsächlich gebraucht">${fmtDur(real)} gebraucht</span>`, `<span class="chip">geplant ${fmtDur(s.dur)}</span>`);
+  else out.push(`<span class="chip c-dur">${fmtDur(real)}</span>`);
+  if (s.status === 'paused') out.push(`<span class="chip chip-paused">Unterbrochen · noch ${fmtDur(restDur(s))}</span>`);
   if (s.at) out.push('<span class="chip">feste Startzeit</span>');
   if (t.overlap) out.push(`<span class="chip chip-over">überschneidet sich um ${t.overlap} min</span>`);
   if (!s.children.length && s.status === 'doing' && t.end > t.plan) out.push(`<span class="chip chip-over">+${Math.max(1, Math.floor((Date.now() - t.plan) / MIN))} min über Plan</span>`);
-  if (!s.children.length && s.status === 'done' && s.doneAt && s.startedAt && Math.round((t.end - t.start) / MIN) !== s.dur) out.push(`<span class="chip">geplant ${s.dur} min</span>`);
-  if (s.children.length) out.push(`<button class="chip chip-sub" data-act="sub" title="Teilschritte öffnen">${s.children.length} Teilschritt${s.children.length > 1 ? 'e' : ''} →</button>`);
+  if (s.children.length) out.push(`<button class="chip chip-sub" data-act="sub" title="Teilschritte öffnen">${ICON_LAYERS}${s.children.length} Teilschritt${s.children.length > 1 ? 'e' : ''}</button>`);
+  const ac = attachCount(s);
+  if (ac) out.push(`<button class="chip" data-act="side-docs" title="Unterlagen öffnen">${ICON_CLIP}${ac}</button>`);
+  if (s.log.length) out.push(`<span class="chip chip-log">Zwischenstand${s.log.length > 1 ? ' · ' + s.log.length : ''}</span>`);
   for (const [k, , one, many] of NOTES) {
     const n = countLines(s[k]);
     if (n) out.push(`<span class="chip chip-${k}"><i></i>${n} ${n === 1 ? one : many}</span>`);
   }
+  if (proj().loop > 1 && s.loopAdded < proj().loop) out.push(`<span class="chip chip-lock" title="Aus einer früheren Schleife, Inhalt gesperrt">${ICON_LOCK}Schleife ${s.loopAdded}</span>`);
+  else if (proj().loop > 1) out.push(`<span class="chip chip-new">neu in Schleife ${s.loopAdded}</span>`);
   return out.join('');
 }
 function compactHTML(s) {
@@ -293,39 +359,61 @@ function compactHTML(s) {
     + (s.desc ? `<p class="c-desc">${esc(s.desc)}</p>` : '')
     + `<div class="chips">${chipsHTML(s)}</div>`;
 }
+function logHTML(s) {
+  if (!s.log.length) return '';
+  return `<div class="zlog"><span class="note-h">Zwischenstand</span>${s.log.slice().reverse().map(x => `<div class="zlog-i"><span class="zlog-t">${esc(dayLabel(Date.parse(x.at)) + ' ' + hm(Date.parse(x.at)))}</span><span class="zlog-x">${esc(x.text)}</span></div>`).join('')}</div>`;
+}
+// Kleine, unscharfe Vorschau der Teilschritte-Zeitachse in der Karte; beim Überfahren scharf, Klick zoomt hinein
+function zoomTabHTML(s) {
+  const k = s.children;
+  const rows = k.slice(0, 5).map(c => { const t = T.get(c.id); return `<span class="ma-row st-${c.status}"><i class="ma-sq">${LABELS.get(c.id)}</i><span class="ma-t">${esc(c.title || 'Ohne Titel')}</span><span class="ma-time">${t ? hm(t.start) : ''}</span></span>`; }).join('');
+  return `<button class="mini-axis${k.length ? '' : ' empty'}" data-act="sub" title="${k.length ? 'In die Teilschritte zoomen (T)' : 'Teilschritte anlegen (T)'}">
+    <span class="ma-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <span class="ma-head"><span>${k.length ? `Teilschritte · ${k.length}` : 'Teilschritte'}</span><svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    <span class="ma-list">${rows || '<span class="ma-row ghost"><i class="ma-sq"></i><span class="ma-t">anlegen</span></span><span class="ma-row ghost"><i class="ma-sq"></i><span class="ma-t"></span></span>'}${k.length > 5 ? `<span class="ma-more">+ ${k.length - 5} weitere</span>` : ''}</span>
+  </button>`;
+}
 function stepHTML(s) {
   const lab = LABELS.get(s.id);
   const kids = s.children.length;
-  const cls = ['step', 'is-' + s.status, s.prio && 'is-prio', ui.path.includes(s.id) && 'sub-open'].filter(Boolean).join(' ');
+  const locked = isLocked(s);
+  const ro = locked ? ' readonly' : '';
+  const cls = ['step', 'is-' + s.status, s.prio && 'is-prio', kids && 'has-kids', locked && 'is-locked', ui.path.includes(s.id) && 'sub-open'].filter(Boolean).join(' ');
   return `<article class="${cls}" data-id="${s.id}">
   <div class="time"><span class="t-date"></span><span class="t-start"></span><span class="t-end"></span></div>
-  <div class="node"><button class="sq" data-act="cycle" title="Klicken: Status wechseln (${STATUS[s.status]}) · Ziehen: verschieben" aria-label="Schritt ${lab}, ${STATUS[s.status]}. Klicken wechselt den Status.">${lab}</button></div>
+  <div class="node"><button class="sq" data-act="cycle" title="Klicken: Status wechseln (${STATUS[s.status]})${locked ? '' : ' · Ziehen: verschieben'}" aria-label="Schritt ${lab}, ${STATUS[s.status]}. Klicken wechselt den Status.">${lab}</button></div>
   <div class="body">
     <div class="compact">${compactHTML(s)}</div>
     <div class="expanded">
-      <textarea class="e-title" data-f="title" rows="1" placeholder="Titel des Schritts" aria-label="Titel">${esc(s.title)}</textarea>
-      <textarea class="e-desc" data-f="desc" rows="1" placeholder="Beschreibung: Was passiert in diesem Schritt?" aria-label="Beschreibung">${esc(s.desc)}</textarea>
+      ${locked && !readOnly() ? `<p class="lock-note">${ICON_LOCK} Aus Schleife ${s.loopAdded}: Titel, Beschreibung und Prozessbeschreibung sind gesperrt. Notizen, Status und Zwischenschritte gehen.</p>` : ''}
+      <textarea class="e-title" data-f="title" rows="1" placeholder="Titel des Schritts" aria-label="Titel"${ro}>${esc(s.title)}</textarea>
+      <textarea class="e-desc" data-f="desc" rows="1" placeholder="Beschreibung: Was passiert in diesem Schritt?" aria-label="Beschreibung"${ro}>${esc(s.desc)}</textarea>
       <div class="notes">${NOTES.map(([k, h, , , ph]) => `
-        <label class="note n-${k}"><span class="note-h">${h}</span><textarea data-f="${k}" rows="2" placeholder="${ph}">${esc(s[k])}</textarea></label>`).join('')}
+        <label class="note n-${k}"><span class="note-h">${h}${k !== 'learnings' && countLines(s[k]) && !readOnly() ? `<button class="note-act" data-act="to-steps" data-f="${k}" title="Zeilen als neue Schritte anlegen">→ Schritte</button>` : ''}</span><textarea data-f="${k}" rows="2" placeholder="${ph}"${readOnly() ? ' readonly' : ''}>${esc(s[k])}</textarea></label>`).join('')}
       </div>
+      ${logHTML(s)}
       <button class="pill icon card-close" data-act="unfocus" aria-label="Schritt schließen" title="Schließen (Esc)"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      ${zoomTabHTML(s)}
       <div class="tools">
         <div class="tool-row">
-        <div class="seg" role="group" aria-label="Status">${Object.keys(STATUS).map(v => `<button data-act="status" data-v="${v}" aria-pressed="${s.status === v}">${STATUS[v]}</button>`).join('')}</div>
+        <div class="seg" role="group" aria-label="Status">${SEG.map(v => `<button data-act="status" data-v="${v}" aria-pressed="${s.status === v}">${STATUS[v]}</button>`).join('')}</div>
         <button class="pill tg-prio" data-act="prio" aria-pressed="${s.prio}">Priorität</button>
-        <button class="pill" data-act="sub">${kids ? `Teilschritte · ${kids}` : 'Teilschritte anlegen'} →</button>
-        </div>
-        <div class="tool-row">
         <label class="fld fld-dur" title="${kids ? 'Ergibt sich aus den Teilschritten' : 'Dauer in Minuten'}"><span>Dauer</span>${kids ? '' : '<button class="stp" data-act="dur" data-d="-5" aria-label="5 Minuten weniger">−</button>'}<input type="number" min="0" step="5" inputmode="numeric" data-f="dur" value="${s.dur}"${kids ? ' disabled' : ''}>${kids ? '' : '<button class="stp" data-act="dur" data-d="5" aria-label="5 Minuten mehr">+</button>'}<span class="unit">min</span></label>
         <button class="fld fld-btn" data-act="pick" data-target="step" title="Eine eigene Startzeit macht den Schritt fest. Folgende Schritte reihen sich dahinter ein."><span>Start</span><b class="fld-val"></b><svg class="cal-ic" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><rect x="1.5" y="2.5" width="10" height="9" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.5 5.5h10M4.5 1v3M8.5 1v3" stroke="currentColor" stroke-width="1.1"/></svg></button>
         <button class="pill" data-act="unfix" title="Startzeit wieder automatisch an den vorherigen Schritt hängen"${s.at ? '' : ' hidden'}>Zeit automatisch</button>
+        </div>
+        <div class="tool-row tool-icons-row">
+        ${s.status === 'doing' ? `<button class="pill ic-l" data-act="break" title="Pause (B): Zeit hält an">${ICON_PAUSE_S}<span>${state.brk ? 'Fortsetzen' : 'Pause'}</span></button><button class="pill ic-l" data-act="interrupt" title="Unterbrechen mit Zwischenstand">${ICON_STOP}<span>Unterbrechen</span></button>` : ''}
+        ${proj().role === 'run' && !readOnly() ? `<button class="pill icon" data-act="to-proc" title="${partnerOf(proj()) ? 'In Prozess übernehmen' : 'Prozess parallel gestalten'}" aria-label="${partnerOf(proj()) ? 'In Prozess übernehmen' : 'Prozess parallel gestalten'}">${ICON_TOPROC}</button>` : ''}
         <span class="tool-icons">
-        <button class="pill icon" data-act="up" aria-label="Nach oben schieben" title="Nach oben (Alt + ↑)">↑</button>
-        <button class="pill icon" data-act="down" aria-label="Nach unten schieben" title="Nach unten (Alt + ↓)">↓</button>
-        <button class="pill icon danger" data-act="del" aria-label="Schritt löschen" title="Schritt löschen"><svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><path d="M2 3.5h9M5 3.5V2h3v1.5M3.2 3.5l.6 7.5h5.4l.6-7.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+        <button class="pill icon" data-act="side-docs" aria-label="Unterlagen" title="Unterlagen: Anhänge, Links, Dokumente">${ICON_CLIP}</button>
+        ${locked ? '' : `<button class="pill icon" data-act="new-doc" aria-label="Neues Dokument" title="Neues Dokument zu diesem Schritt">${ICON_DOC}</button>`}
+        ${locked ? '' : `<button class="pill icon" data-act="card-menu" aria-label="Verschieben" title="Nach oben / unten">${ICON_MORE}</button>`}
+        ${locked ? '' : `<button class="pill icon danger" data-act="del" aria-label="Schritt löschen" title="Schritt löschen">${ICON_TRASH}</button>`}
         </span>
         </div>
       </div>
+      <div class="proc-slot" data-step="${s.id}"></div>
     </div>
   </div>
 </article>`;
@@ -363,18 +451,24 @@ function axisHTML(steps, key) {
 }
 
 function render() {
+  hidePeek();
   recompute();
   const p = proj();
   $('#projName').textContent = p.title || 'Ohne Titel';
   document.title = (p.title ? p.title + ' · ' : '') + 'Lazerfocus';
   const pt = $('#pTitle');
   if (document.activeElement !== pt) pt.value = p.title;
+  pt.readOnly = readOnly();
+  document.documentElement.dataset.loop = p.loop;
+  document.body.classList.toggle('ro', readOnly());
   $('#mainAxis').innerHTML = axisHTML(p.steps, 'main');
   renderSub();
   updateTimes();
   applyFocus(false);
   updateNav();
   updateCoach();
+  renderRoleSwitch();
+  renderSide();
 }
 
 function renderSub() {
@@ -422,6 +516,16 @@ function renderHead() {
   fb.setAttribute('aria-pressed', String(p.foldDone !== false));
   fb.querySelector('b').textContent = doneN;
   fb.hidden = doneN < 2;
+  const lb = $('#loopBtn');
+  lb.hidden = p.role === 'process';
+  lb.className = 'chip-btn loop-btn l' + p.loop;
+  lb.innerHTML = p.finished ? `<i class="loop-dot l3"></i>Lauf abgeschlossen` : `<i class="loop-dot l${p.loop}"></i>Schleife ${p.loop} · ${LOOPS[p.loop].name}`;
+  const ab = $('#archBanner');
+  ab.hidden = !readOnly();
+  if (readOnly()) ab.innerHTML = `${ICON_LOCK} ${p.archived ? `Archivierte Version ${p.version}` : 'Lauf abgeschlossen'}${p.runs.length ? ` · ${p.runs.length} Schleife${p.runs.length > 1 ? 'n' : ''}` : ''} · nur lesen${p.finished && !p.archived ? ' · <button class="note-act" data-act="proj-version">Neue Prozessversion</button>' : ''}`;
+  $('#roleTag').hidden = p.role !== 'process';
+  $('#verTag').hidden = p.version < 2;
+  $('#verTag').textContent = 'Version ' + p.version;
   const pb = $('#parkBtn');
   pb.hidden = !p.inbox.length;
   pb.querySelector('b').textContent = p.inbox.length;
@@ -476,6 +580,9 @@ function updateNow() {
     if (!rows.length || axis.offsetParent === null) { line.hidden = true; continue; }
     line.hidden = false;
     let top = null, outside = false;
+    // Laufende Aufgabe hat Vorrang: die Linie geht mit ihr mit, auch wenn übersprungene Schritte davor stehen
+    const run = rows.find(r => { const s = STEPS.get(r.dataset.id); return s && s.status === 'doing' && !s.children.length; });
+    if (run) { const t = T.get(run.dataset.id); top = run.offsetTop + Math.min(1, Math.max(0, (now - t.start) / Math.max(1, t.end - t.start))) * run.offsetHeight; }
     for (let i = 0; i < rows.length && top === null; i++) {
       const t = T.get(rows[i].dataset.id);
       if (!t) continue;
@@ -521,6 +628,8 @@ function applyFocus(scroll) {
     });
     if (fi >= 0) {
       $$('textarea', rows[fi]).forEach(autosize);
+      const slot = rows[fi].querySelector('.proc-slot');
+      if (slot && !slot._mounted && window.LF && LF.docs && LF.docs.mountProcess) { slot._mounted = true; LF.docs.mountProcess(slot, rows[fi].dataset.id); }
       if (scroll) {
         // hohe Karten oben ausrichten, damit Titel und Felder sichtbar bleiben
         const col = axis.closest('.col');
@@ -529,9 +638,12 @@ function applyFocus(scroll) {
       }
     }
   }
+  const fid = ui.focus ? ui.focus.id : null;
+  if (fid !== lastFocusId) { lastFocusId = fid; if (window.LF && LF.docs && LF.docs.onFocus) LF.docs.onFocus(fid); }
   setTimeout(updateNow, 60);
   setTimeout(updateNow, 480);
 }
+let lastFocusId = null;
 function setFocus(axis, id, opts = {}) {
   const changed = !ui.focus || ui.focus.id !== id;
   ui.focus = { axis, id };
@@ -630,7 +742,7 @@ function zoomAnim(deeper, old, now, from, label, status) {
   if (reduceMotion.matches || !from || !Element.prototype.animate) return;
   const MS = 620, ease = 'cubic-bezier(.65,0,.2,1)';
   const giant = $('#zoomGiant'), zoom = $('#colSub'), content = $('#zoomScroll');
-  const origin = r => `${r.left + r.width / 2}px ${r.top + r.height / 2 - $('#stage').getBoundingClientRect().top}px`;
+  const origin = r => `${r.left + r.width / 2}px ${r.top + r.height / 2 - $('#stageMain').getBoundingClientRect().top}px`;
   if (deeper) {
     const to = giant.getBoundingClientRect();
     giant.animate([{ opacity: 0 }, { opacity: 0, offset: .85 }, { opacity: 1 }], { duration: MS + 120 });
@@ -683,6 +795,7 @@ function updateNav() {
 function moveStep(id, dir) {
   const L = locate(id);
   if (!L) return;
+  if (isLocked(L.step)) { toast('Gesperrt: Schritt aus einer früheren Schleife.'); haptic('error'); return; }
   const j = L.index + dir;
   if (j < 0 || j >= L.list.length) { haptic('error'); return; }
   mutate(() => { L.list.splice(L.index, 1); L.list.splice(j, 0, L.step); });
@@ -692,6 +805,7 @@ function moveStep(id, dir) {
 function deleteStep(id) {
   const L = locate(id);
   if (!L) return;
+  if (isLocked(L.step)) { toast('Gesperrt: Schritt aus einer früheren Schleife.'); haptic('error'); return; }
   const before = snap();
   mutate(() => L.list.splice(L.index, 1));
   if (ui.focus && ui.focus.id === id) ui.focus = null;
@@ -702,23 +816,39 @@ function deleteStep(id) {
 }
 function applyStatus(s, v) {
   const iso = new Date().toISOString();
-  if (v === 'doing') { if (!s.startedAt || s.status === 'open') s.startedAt = iso; s.doneAt = null; }
-  else if (v === 'done') s.doneAt = iso;
-  else { s.startedAt = null; s.doneAt = null; }
+  if (v === 'doing') {
+    if (!s.startedAt || s.status === 'open' || s.status === 'paused') { s.startedAt = iso; s.pauses = []; }
+    if (s.status === 'open') s.worked = 0;
+    s.doneAt = null;
+    if (state.brk) s.pauses.push({ from: iso, to: null });
+  } else if (v === 'done') { closePauses(s, iso); s.doneAt = iso; }
+  else { s.startedAt = null; s.doneAt = null; s.worked = 0; s.pauses = []; }
   s.status = v;
+}
+// Zwischenstand nachtragen (z. B. nach automatischem Unterbrechen)
+function addLog(id) {
+  const s = STEPS.get(id);
+  if (!s) return;
+  openDialog({ title: 'Zwischenstand', body: `<p>Für <b>${esc(LABELS.get(s.id) + ' ' + (s.title || 'Ohne Titel'))}</b>: Was ist offen?</p><textarea class="park-in z-in" rows="5"></textarea>`,
+    actions: [{ label: 'Abbrechen' }, { label: 'Speichern', cls: 'primary', fn: v => { if ((v || '').trim()) mutate(() => s.log.push({ at: new Date().toISOString(), text: v.trim(), kind: 'zwischenstand' })); } }] });
+  setTimeout(() => { const t = $('#dialog textarea'); if (t) t.focus(); }, 30);
 }
 function cycle(id, el) {
   const s = STEPS.get(id);
   if (!s) return;
   const next = NEXT[s.status];
-  mutate(() => applyStatus(s, next));
+  let others = [];
+  mutate(() => { if (next === 'doing') others = startStep(s); else applyStatus(s, next); });
+  if (others.length) toast(`${others.map(o => LABELS.get(o.id)).join(', ')} unterbrochen`, { label: 'Zwischenstand', fn: () => addLog(others[0].id) });
   haptic(next === 'done' ? 'done' : 'tap');
   bump(document.querySelector(`.step[data-id="${id}"] .sq`) || el);
 }
 function setStatus(id, v) {
   const s = STEPS.get(id);
   if (!s || s.status === v) return;
-  mutate(() => applyStatus(s, v));
+  let others = [];
+  mutate(() => { if (v === 'doing') others = startStep(s); else applyStatus(s, v); });
+  if (others.length) toast(`${others.map(o => LABELS.get(o.id)).join(', ')} unterbrochen`, { label: 'Zwischenstand', fn: () => addLog(others[0].id) });
   haptic(v === 'done' ? 'done' : 'tap');
   bump(document.querySelector(`.step[data-id="${id}"] .sq`));
 }
@@ -740,6 +870,7 @@ function switchProject(id) {
 }
 function createProject() {
   const p = newProject();
+  p.folderId = proj().folderId || null;
   pushHistory();
   state.projects.push(p);
   state.activeId = p.id; ui.focus = null; ui.path = []; ui.trail = [];
@@ -782,7 +913,7 @@ function deleteProject() {
 
 /* Sichern & Laden */
 function exportData() {
-  const data = { app: 'zeitachse', version: 1, exported: new Date().toISOString(), projects: state.projects };
+  const data = { app: 'zeitachse', version: 1, exported: new Date().toISOString(), projects: state.projects, folders: state.folders || [] };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   const d = new Date();
@@ -809,6 +940,7 @@ function importData(file) {
     const reid = s => { s.id = uid(); s.children.forEach(reid); };
     const added = list.map(normProject).map(p => { if (ids.has(p.id)) p.id = uid(); p.steps.forEach(reid); return p; });
     state.projects.push(...added);
+    if (Array.isArray(data.folders)) data.folders.map(normFolder).forEach(f => { if (!folderById(f.id)) state.folders.push(f); });
     state.activeId = added[0].id; ui.focus = null; ui.path = []; ui.trail = [];
     save(); render(); haptic('done');
     toast(`${added.length} Projekt${added.length === 1 ? '' : 'e'} geladen`, { label: 'Rückgängig', fn: undoTo(before) });
@@ -820,13 +952,25 @@ function importData(file) {
 /* ---------- Menüs, Dialog, Toast ---------- */
 function renderProjMenu() {
   const m = $('#projMenu');
-  m.innerHTML = '<span class="m-label">Projekte</span>'
-    + state.projects.map(p => {
-      const t = tally(p.steps);
-      return `<button class="m-item${p.id === state.activeId ? ' active' : ''}" data-act="proj-open" data-pid="${p.id}"><span class="m-name">${esc(p.title || 'Ohne Titel')}</span><span class="m-sub">${t.done}/${t.n}</span></button>`;
-    }).join('')
-    + '<div class="m-sep"></div>'
+  const groups = new Map();
+  for (const p of state.projects) { const f = folderOf(p); if (!groups.has(f)) groups.set(f, []); groups.get(f).push(p); }
+  ui.archOpen = ui.archOpen || new Set();
+  const item = p => { const t = tally(p.steps); return `<button class="m-item${p.id === state.activeId ? ' active' : ''}" data-act="proj-open" data-pid="${p.id}"><span class="m-name">${esc(p.title || 'Ohne Titel')}</span>${p.role === 'process' ? '<span class="m-tag">Prozess</span>' : ''}${p.version > 1 ? `<span class="m-tag">v${p.version}</span>` : ''}<span class="m-sub">${t.done}/${t.n}</span></button>`; };
+  let h = '<button class="m-item" data-act="home">Projektverwaltung … <span class="m-sub">Ordner</span></button><div class="m-sep"></div><span class="m-label">Projekte</span>';
+  for (const [f, list] of groups) {
+    const live = list.filter(p => !p.archived), arch = list.filter(p => p.archived).sort((a, b) => b.version - a.version);
+    h += live.map(item).join('');
+    if (arch.length) {
+      const open = ui.archOpen.has(f);
+      h += `<button class="m-item m-arch" data-act="arch-toggle" data-folder="${esc(f)}"><span class="m-name">Archiv · ${esc(f)}</span><span class="m-sub">${arch.length} ${open ? '▴' : '▾'}</span></button>`;
+      if (open) h += arch.map(p => `<button class="m-item m-old${p.id === state.activeId ? ' active' : ''}" data-act="proj-open" data-pid="${p.id}"><span class="m-name">Version ${p.version}${p.role === 'process' ? ' · Prozess' : ''}</span><span class="m-sub">${p.runs.length} Schleife${p.runs.length === 1 ? '' : 'n'}</span></button>`).join('');
+    }
+  }
+  const p = proj();
+  m.innerHTML = h + '<div class="m-sep"></div>'
     + '<button class="m-item" data-act="proj-new">Neues Projekt</button>'
+    + `<button class="m-item" data-act="proj-version">Neue Prozessversion <span class="m-sub">archiviert v${p.version}</span></button>`
+    + (p.role === 'run' ? `<button class="m-item" data-act="proj-pair">${partnerOf(p) ? 'Zum Prozess-Entwurf' : 'Prozess parallel gestalten …'} <span class="m-sub">W</span></button>` : (partnerOf(p) ? '<button class="m-item" data-act="proj-pair">Zur Ausführung <span class="m-sub">W</span></button>' : ''))
     + '<button class="m-item" data-act="proj-dup">Projekt duplizieren</button>'
     + '<button class="m-item danger" data-act="proj-del">Projekt löschen …</button>';
 }
@@ -837,7 +981,9 @@ function renderMoreMenu() {
     + `<button class="m-item" data-act="cloud">Cloud-Sync <span class="m-sub">${esc(window.LF && LF.label ? LF.label() : 'aus')}</span></button>`
     + `<span class="m-note">Zuletzt gesichert: ${state.lastExport ? dayLabel(state.lastExport) + ' ' + hm(state.lastExport) : 'noch nie'}</span>`
     + '<div class="m-sep"></div><span class="m-label">Projekt</span>'
-    + '<button class="m-item" data-act="review">Rückblick …</button>'
+    + '<button class="m-item" data-act="loop">Schleifen …</button>'
+    + '<button class="m-item" data-act="report">Bericht: Ideen & Fragen …</button>'
+    + '<button class="m-item" data-act="export-pdf">Zeitachse als PDF</button>'
     + `<button class="m-item" data-act="park-list">Parkplatz <span class="m-sub">${proj().inbox.length}</span></button>`
     + '<button class="m-item" data-act="park-new">Idee parken <span class="m-sub">I</span></button>'
     + '<div class="m-sep"></div><span class="m-label">Bedienung</span>'
@@ -887,6 +1033,9 @@ function showKeys() {
       + k(['⌘/Strg', 'Z'], 'Rückgängig (⇧ für Wiederholen)')
       + k(['J'], 'Zur aktuellen Uhrzeit springen')
       + k(['I'], 'Idee parken, ohne den Schritt zu verlassen')
+      + k(['B'], 'Pause / Fortsetzen (Zeit hält an)')
+      + k(['W'], 'Wechsel Ausführung ⇄ Prozess')
+      + k(['D'], 'Unterlagen ein/aus')
       + k(['←', '→'], 'Eine Ebene zurück / tiefer')
       + '<dt><kbd>Ziehen</kbd></dt><dd>Am Nummern-Quadrat: verschieben, auf einen Schritt: hineinlegen</dd>'
       + k(['Esc'], 'Fokus beenden, dann Teilschritte schließen')
@@ -1017,7 +1166,9 @@ const inSubtree = (step, list) => step.children === list || step.children.some(c
 document.addEventListener('pointerdown', e => {
   const sq = e.target.closest('.axis .sq');
   if (!sq || e.button !== 0) return;
-  drag.id = sq.closest('.step').dataset.id;
+  const st = STEPS.get(sq.closest('.step').dataset.id);
+  if (!st || isLocked(st)) return;   // gesperrte Schritte (frühere Schleife) bleiben an ihrem Platz
+  drag.id = st.id;
   drag.sx = drag.px = e.clientX; drag.sy = drag.py = e.clientY; drag.on = false;
 });
 addEventListener('pointermove', e => {
@@ -1075,7 +1226,8 @@ function findDropTarget() {
       if (rel > .3 && rel < .7) {
         const host = STEPS.get(row.dataset.id);
         list = host.children; index = list.length; mark = row; into = short(host.title);
-        row.classList.add(host === src || inSubtree(src, list) ? 'drop-bad' : 'drop-into');
+        row.classList.add(host === src || inSubtree(src, list) || isLocked(host) ? 'drop-bad' : 'drop-into');
+        if (isLocked(host)) { drag.target = null; return; }
       }
     }
     if (!list) {
@@ -1158,7 +1310,7 @@ function currentLeaf(now) {
     || null;
 }
 function nextLeaf(now, exceptId) {
-  return leaves(proj().steps).filter(s => s.status === 'open' && s.id !== exceptId && T.get(s.id).start > now - MIN)
+  return leaves(proj().steps).filter(s => (s.status === 'open' || s.status === 'paused') && s.id !== exceptId && T.get(s.id).start > now - MIN)
     .sort((a, b) => T.get(a.id).start - T.get(b.id).start)[0] || null;
 }
 function milestoneTimes(s) {
@@ -1185,7 +1337,7 @@ function markFired(k) {
 }
 let coachAlert = null, coachAlertTimer;
 function checkReminders() {
-  if (!state.settings.remind) return;
+  if (!state.settings.remind || state.brk || readOnly()) return;
   const now = Date.now();
   const s = currentLeaf(now);
   if (!s) return;
@@ -1227,6 +1379,7 @@ function remind(s, m) {
   }
 }
 
+const ICON_PAUSE = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5v7M8 2.5v7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 const ICON_PARK = '<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><path d="M6.5 1.5a3.5 3.5 0 0 0-2 6.4V9.5h4V7.9a3.5 3.5 0 0 0-2-6.4ZM5 11.5h3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
 function updateCoach() {
   const c = $('#coach');
@@ -1236,11 +1389,22 @@ function updateCoach() {
   const nx = s ? null : nextLeaf(now);
   const mini = !!state.settings.coachMini && !coachAlert;
   c.classList.toggle('mini', mini);
-  if (!s && !nx) { c.hidden = true; c._html = ''; document.documentElement.style.setProperty('--coach-h', '0px'); return; }
+  if (!s && !nx && !state.brk) { c.hidden = true; c._html = ''; document.documentElement.style.setProperty('--coach-h', '0px'); return; }
+  if (readOnly() || proj().role === 'process') { c.hidden = true; c._html = ''; document.documentElement.style.setProperty('--coach-h', '0px'); return; }
   c.hidden = false;
   const park = `<button class="pill icon" data-act="coach-park" title="Idee parken (I)" aria-label="Idee parken">${ICON_PARK}</button>`;
   let html = '', pillTxt = '';
-  if (s && s.status === 'doing') {
+  if (state.brk) {
+    const mins = Math.floor((now - Date.parse(state.brk.from)) / MIN);
+    c.dataset.phase = 'break';
+    pillTxt = `Pause ${mins} min`;
+    html = `<div class="c-row">
+      <span class="c-sq c-sq-break">${ICON_PAUSE}</span>
+      <div class="c-main"><span class="c-eyebrow">Pause</span><span class="c-title">${s && s.status === 'doing' ? 'Danach weiter mit ' + esc(LABELS.get(s.id) + ' ' + (s.title || 'Ohne Titel')) : 'Die Zeitachse wartet'}</span></div>
+      <div class="c-left"><b>${mins}</b><span>min Pause</span></div>
+    </div>
+    <div class="c-foot"><span class="c-msg">Die Zeit der Aufgabe steht still. Folgende Schritte rücken nach.</span><span class="c-actions"><button class="pill primary" data-act="coach-break">Fortsetzen</button></span></div>`;
+  } else if (s && s.status === 'doing') {
     const t = T.get(s.id), total = Math.max(MIN, t.plan - t.start), f = Math.min(1, (now - t.start) / total);
     const ph = phaseOf(s, now);
     c.dataset.phase = ph;
@@ -1257,22 +1421,22 @@ function updateCoach() {
     <div class="c-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(f * 100)}" aria-label="Verstrichene Zeit"><i style="width:${f * 100}%"></i>${ms.map(m => `<span class="tick${now >= m.at ? ' past' : ''}" style="left:${(m.at - t.start) / total * 100}%" title="${esc(m.title)}"></span>`).join('')}</div>
     <div class="c-foot">
       <span class="c-msg">${alert ? esc(alert.msg) : coachHint(s, f, ph)}</span>
-      <span class="c-actions">${park}<button class="pill" data-act="coach-extend" data-id="${s.id}" title="5 Minuten mehr, folgende Schritte rücken nach">+5 min</button><button class="pill c-done" data-act="coach-done" data-id="${s.id}">Erledigt</button><button class="pill" data-act="coach-open" data-id="${s.id}">Öffnen</button></span>
+      <span class="c-actions">${park}<button class="pill icon" data-act="coach-break" title="Pause (B): Zeit anhalten" aria-label="Pause">${ICON_PAUSE}</button><button class="pill icon" data-act="interrupt" data-id="${s.id}" title="Unterbrechen mit Zwischenstand" aria-label="Unterbrechen">${ICON_STOP}</button><button class="pill icon" data-act="coach-menu" data-id="${s.id}" title="Verlängern, öffnen" aria-label="Weitere Aktionen">${ICON_MORE}</button><button class="pill c-done" data-act="coach-done" data-id="${s.id}">Erledigt</button></span>
     </div>`;
   } else {
     const n = s || nx, t = T.get(n.id);
     c.dataset.phase = 'idle';
     pillTxt = s ? 'jetzt' : 'ab ' + hm(t.start);
     html = `<div class="c-row">
-      <span class="c-sq">${LABELS.get(n.id)}</span>
-      <div class="c-main"><span class="c-eyebrow">${s ? 'Jetzt dran' : 'Als Nächstes · ' + hm(t.start)}</span><span class="c-title">${esc(n.title || 'Ohne Titel')}</span></div>
+      <span class="c-sq is-${n.status}">${LABELS.get(n.id)}</span>
+      <div class="c-main"><span class="c-eyebrow">${n.status === 'paused' ? 'Unterbrochen · fortsetzen?' : s ? 'Jetzt dran' : 'Als Nächstes · ' + hm(t.start)}</span><span class="c-title">${esc(n.title || 'Ohne Titel')}</span></div>
       <div class="c-left">${s ? `<b>${Math.round((t.end - t.start) / MIN)}</b><span>min geplant</span>` : `<b>${fmtCount(t.start - now)}</b><span>bis Start</span>`}</div>
     </div>
-    <div class="c-foot"><span class="c-msg">${s ? 'Starte den Schritt, dann läuft die Uhr.' : 'Pause oder Vorbereitung.'}</span><span class="c-actions">${park}<button class="pill" data-act="coach-open" data-id="${n.id}">Öffnen</button><button class="pill primary" data-act="coach-start" data-id="${n.id}">${s ? 'Starten' : 'Jetzt starten'}</button></span></div>`;
+    <div class="c-foot"><span class="c-msg">${n.log.length ? 'Zwischenstand: ' + esc(n.log[n.log.length - 1].text.slice(0, 90)) : s ? 'Starte den Schritt, dann läuft die Uhr.' : 'Pause oder Vorbereitung.'}</span><span class="c-actions">${park}<button class="pill" data-act="coach-open" data-id="${n.id}">Öffnen</button><button class="pill primary" data-act="coach-start" data-id="${n.id}">${s ? 'Starten' : 'Jetzt starten'}</button></span></div>`;
   }
-  const n = s || nx;
+  const n = s || nx || { id: '', status: 'open' };
   html += `<button class="c-min" data-act="coach-mini" aria-label="${mini ? 'Leiste aufklappen' : 'Leiste einklappen'}" title="${mini ? 'Aufklappen' : 'Einklappen'}"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="${mini ? 'M3 7.5 6 4.5 9 7.5' : 'M3 4.5 6 7.5 9 4.5'}" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>`
-    + `<button class="c-pill" data-act="coach-mini" aria-label="Leiste aufklappen"><span class="c-sq is-${n.status}">${LABELS.get(n.id)}</span><b>${pillTxt}</b></button>`;
+    + `<button class="c-pill" data-act="coach-mini" aria-label="Leiste aufklappen"><span class="c-sq is-${n.status}">${state.brk ? ICON_PAUSE : LABELS.get(n.id) || ''}</span><b>${pillTxt}</b></button>`;
   // nur neu schreiben, wenn sich etwas geändert hat (verhindert Flackern der Knöpfe)
   if (c._html !== html) { c.innerHTML = html; c._html = html; }
   document.documentElement.style.setProperty('--coach-h', c.offsetHeight + 'px');
@@ -1282,7 +1446,7 @@ function coachHint(s, f, ph) {
   if (ph === 'over') return 'Abschließen oder bewusst verlängern. Folgende Schritte rücken nach.';
   if (ph === 'final') return 'Abschließen und Ergebnis notieren.';
   const past = MILESTONES.filter(m => m.f !== null && m.f > 0 && m.f < 1 && f >= m.f);
-  return past.length ? past[past.length - 1].msg : 'Ziel im Blick behalten, Details später.';
+  return past.length ? past[past.length - 1].msg : LOOPS[proj().loop].hint;
 }
 
 function coachAct(act, id, el) {
@@ -1303,7 +1467,8 @@ function coachAct(act, id, el) {
   }
   if (act === 'coach-start') {
     const before = snap();
-    mutate(() => applyStatus(s, 'doing'));
+    mutate(() => startStep(s));
+    jumpToNow(true);
     haptic('done'); coachAlert = null;
     toast(`${LABELS.get(s.id)} läuft · ${s.dur} min geplant`, { label: 'Rückgängig', fn: undoTo(before) });
     updateCoach();
@@ -1313,6 +1478,7 @@ function coachAct(act, id, el) {
     const t = T.get(id), early = Math.floor((t.plan - Date.now()) / MIN);
     mutate(() => applyStatus(s, 'done'));
     haptic('done'); coachAlert = null;
+    jumpToNow(true);
     const nx = nextLeaf(Date.now(), id);
     const msg = early >= 2 ? `Erledigt, ${early} min früher` : 'Erledigt';
     if (nx) toast(`${msg} · weiter mit ${LABELS.get(nx.id)}`, { label: 'Starten', fn: () => coachAct('coach-start', nx.id) });
@@ -1322,8 +1488,7 @@ function coachAct(act, id, el) {
   }
   if (act === 'coach-extend') {
     if (s.children.length) { toast('Dieser Schritt dauert so lange wie seine Teilschritte.'); return; }
-    const t = T.get(id);
-    const elapsed = Math.ceil((Date.now() - t.start) / MIN);
+    const elapsed = Math.ceil(workedNow(s));
     const before = snap();
     mutate(() => { s.dur = Math.max(s.dur || 0, elapsed) + 5; });
     haptic('tap'); coachAlert = null;
@@ -1483,10 +1648,572 @@ async function toggleNotify() {
   if (p !== 'granted') toast('Mitteilungen sind im Browser blockiert. Anleitung steht im Fenster.');
 }
 
+/* ---------- Pause & Unterbrechen ---------- */
+// Netto gearbeitete Minuten eines laufenden Schritts (ohne Essenspausen), plus frühere Arbeit
+function workedNow(s, now = Date.now()) {
+  const st = s.startedAt ? Date.parse(s.startedAt) : NaN;
+  return (s.worked || 0) + (isNaN(st) ? 0 : Math.max(0, (now - st - pausedMs(s, now)) / MIN));
+}
+function closePauses(s, iso) { (s.pauses || []).forEach(x => { if (!x.to) x.to = iso; }); }
+// Start eines Schritts: andere laufende Schritte werden unterbrochen (Arbeit bleibt gezählt)
+function startStep(s) {
+  const iso = new Date().toISOString();
+  const others = leavesOf(proj().steps).filter(x => x !== s && x.status === 'doing');
+  if (state.brk) endBreak(true);
+  for (const o of others) { o.worked = Math.round(workedNow(o)); o.status = 'paused'; o.startedAt = null; o.pauses = []; }
+  applyStatus(s, 'doing');
+  return others;
+}
+function startBreak() {
+  if (state.brk || readOnly()) return;
+  const iso = new Date().toISOString();
+  mutate(() => {
+    state.brk = { from: iso };
+    leavesOf(proj().steps).filter(x => x.status === 'doing').forEach(x => x.pauses.push({ from: iso, to: null }));
+  });
+  coachAlert = null; haptic('soft');
+  toast('Pause. Die Zeit der Aufgabe steht still.');
+}
+function endBreak(silent) {
+  const b = state.brk;
+  if (!b) return;
+  const iso = new Date().toISOString(), mins = Math.round((Date.now() - Date.parse(b.from)) / MIN);
+  const run = () => { allOf(proj().steps).forEach(x => closePauses(x, iso)); state.brk = null; };
+  if (silent) run(); else { mutate(run); haptic('done'); toast(`Weiter geht's · ${fmtDur(mins)} Pause`); }
+}
+function interrupt(id) {
+  const s = STEPS.get(id);
+  if (!s || s.status !== 'doing') return;
+  openDialog({
+    title: 'Unterbrechen',
+    body: `<p>Zwischenstand für <b>${esc(LABELS.get(s.id) + ' ' + (s.title || 'Ohne Titel'))}</b>: Was ist offen? Nächste Schritte, Links, Notizen.</p><textarea class="park-in z-in" rows="5" placeholder="z. B. Angebot von Firma X fehlt noch …"></textarea><p class="muted-s">Bisher gearbeitet: ${fmtDur(workedNow(s))} von ${fmtDur(s.dur)}. Beim Fortsetzen läuft nur die Restzeit.</p>`,
+    actions: [{ label: 'Abbrechen' }, { label: 'Unterbrechen', cls: 'primary', fn: v => {
+      const iso = new Date().toISOString();
+      mutate(() => {
+        if ((v || '').trim()) s.log.push({ at: iso, text: v.trim(), kind: 'zwischenstand' });
+        s.worked = Math.round(workedNow(s)); s.status = 'paused'; s.startedAt = null; s.pauses = [];
+      });
+      haptic('strong'); coachAlert = null;
+      const nx = nextLeaf(Date.now(), s.id);
+      if (nx) toast(`Unterbrochen · weiter mit ${LABELS.get(nx.id)}`, { label: 'Starten', fn: () => coachAct('coach-start', nx.id) });
+      else toast('Unterbrochen');
+    } }],
+  });
+  setTimeout(() => { const t = $('#dialog textarea'); if (t) t.focus(); }, 30);
+}
+
+/* ---------- Schleifen ---------- */
+function runSnapshot(p) {
+  recompute();
+  return {
+    loop: p.loop, startedAt: p.loopStartedAt || p.start, endedAt: new Date().toISOString(),
+    steps: allOf(p.steps).map(s => { const t = T.get(s.id); return { id: s.id, label: LABELS.get(s.id), title: s.title, status: s.status, dur: s.dur, real: t ? Math.round((t.end - t.start) / MIN) : null, measured: !!(s.startedAt && s.doneAt), worked: Math.round(workedNow(s)), log: s.log.slice(), ideas: s.ideas, questions: s.questions, learnings: s.learnings, loopAdded: s.loopAdded }; }),
+    inbox: p.inbox.slice(),
+  };
+}
+function showLoop() {
+  const p = proj();
+  const L = n => `<li class="${n === p.loop ? 'cur' : n < p.loop ? 'past' : ''}"><b class="loop-dot l${n}"></b><span><b>${n}. ${LOOPS[n].name}</b><small>${LOOPS[n].hint}</small></span></li>`;
+  const tl = tally(p.steps);
+  const last = p.loop === 3;
+  openDialog({
+    title: p.finished ? 'Lauf abgeschlossen' : `Schleife ${p.loop} · ${LOOPS[p.loop].name}`,
+    body: `<ol class="loop-list">${L(1)}${L(2)}${L(3)}</ol>
+      <p class="muted-s">${p.finished ? 'Alle drei Schleifen sind archiviert. Für den nächsten Durchgang erstellst du eine neue Prozessversion.' : `Erledigt: ${tl.done} von ${tl.n}. ${last ? 'Abschließen archiviert den Lauf.' : `Nächste Schleife: Schritte aus Schleife ${p.loop} werden gesperrt (Inhalt), der Status beginnt neu. Du kannst Schritte dazwischen einfügen und aus Ideen und Fragen neue Schritte bauen.`}`}</p>`,
+    actions: p.finished || readOnly()
+      ? [{ label: 'Bericht', fn: () => showReport(p.runs.length - 1) }, { label: 'Neue Prozessversion', cls: 'primary', fn: newVersion }]
+      : [{ label: 'Bericht', fn: () => showReport(-1) }, { label: last ? 'Lauf abschließen' : `Schleife ${p.loop + 1} starten`, cls: 'primary', fn: finishLoop }],
+  });
+}
+function finishLoop() {
+  const p = proj();
+  if (readOnly() || p.finished) return;
+  if (state.brk) endBreak(true);
+  const iso = new Date().toISOString();
+  const runIdx = p.runs.length;
+  mutate(() => {
+    allOf(p.steps).forEach(s => { if (s.status === 'doing') { s.worked = Math.round(workedNow(s)); closePauses(s, iso); } });
+    p.runs.push(runSnapshot(p));
+    if (p.loop >= 3) { p.finished = iso; return; }
+    allOf(p.steps).forEach(s => { s.status = 'open'; s.startedAt = null; s.doneAt = null; s.worked = 0; s.pauses = []; s.log = []; });
+    p.loop += 1;
+    p.start = new Date(floorMin(Date.now())).toISOString();
+    p.loopStartedAt = iso;
+    ui.unfolded.clear();
+  });
+  haptic('done');
+  jumpToNow(true);
+  showReport(runIdx, true);
+}
+
+/* ---------- Bericht: Ideen, Fragen, Zwischenstände, Zeiten ---------- */
+function reportData(runIdx) {
+  const p = proj();
+  if (runIdx < 0 && p.finished && p.runs.length) runIdx = p.runs.length - 1;
+  if (runIdx >= 0 && p.runs[runIdx]) { const r = p.runs[runIdx]; return { title: `Schleife ${r.loop} · ${LOOPS[r.loop].name}`, from: r.startedAt, to: r.endedAt, steps: r.steps, inbox: r.inbox || [] }; }
+  return { title: `Schleife ${p.loop} · ${LOOPS[p.loop].name} (läuft)`, from: p.loopStartedAt || p.start, to: null, steps: runSnapshot(p).steps, inbox: p.inbox };
+}
+function reportHTML(d) {
+  const lines = t => t.split('\n').map(x => x.trim()).filter(Boolean);
+  const sec = (h, items, empty) => `<h3 class="rv-h">${h}</h3>${items.length ? `<ul class="rv-list">${items.join('')}</ul>` : `<p class="muted-s">${empty}</p>`}`;
+  const by = k => d.steps.filter(s => lines(s[k] || '').length).map(s => `<li><span>${esc(s.label + ' ' + (s.title || 'Ohne Titel'))}</span>${lines(s[k]).map(l => `<span class="rv-t">• ${esc(l)}</span>`).join('')}</li>`);
+  const times = d.steps.filter(s => s.status === 'done' && s.measured).map(s => `<li><span>${esc(s.label + ' ' + (s.title || 'Ohne Titel'))}</span><span class="rv-m${s.real > s.dur ? ' over' : ''}">gebraucht ${fmtDur(s.real)} · geplant ${fmtDur(s.dur)}</span></li>`);
+  const logs = d.steps.filter(s => (s.log || []).length).map(s => `<li><span>${esc(s.label + ' ' + (s.title || 'Ohne Titel'))}</span>${s.log.map(x => `<span class="rv-t">${esc(hm(Date.parse(x.at)))} · ${esc(x.text)}</span>`).join('')}</li>`);
+  const open = d.steps.filter(s => s.status !== 'done' && !d.steps.some(c => c !== s && c.label.startsWith(s.label + '.'))).map(s => `<li><span>${esc(s.label + ' ' + (s.title || 'Ohne Titel'))}</span><span class="rv-m">${STATUS[s.status] || s.status}</span></li>`);
+  return sec('Ideen', by('ideas'), 'Keine Ideen notiert.') + sec('Fragen', by('questions'), 'Keine Fragen notiert.')
+    + sec('Zwischenstände', logs, 'Keine Unterbrechungen.') + sec('Ergebnisse & Learnings', by('learnings'), 'Keine Learnings notiert.')
+    + sec('Zeiten', times, 'Noch keine gemessenen Schritte.') + sec('Nicht erledigt', open, 'Alles erledigt.')
+    + sec(`Parkplatz · ${d.inbox.length}`, d.inbox.map(i => `<li><span class="rv-t">${esc(i.text)}</span></li>`), 'Nichts geparkt.');
+}
+function showReport(runIdx, afterLoop) {
+  const d = reportData(runIdx);
+  const p = proj();
+  openDialog({
+    title: afterLoop ? (p.finished ? 'Lauf abgeschlossen' : `Schleife ${p.loop} beginnt`) : 'Bericht',
+    body: `${p.runs.length && !afterLoop ? `<div class="rp-runs" role="group" aria-label="Schleife wählen">${p.runs.map((r, i) => `<button class="chip-btn${(runIdx < 0 && p.finished ? p.runs.length - 1 : runIdx) === i ? ' on' : ''}" data-act="report-run" data-i="${i}"><i class="loop-dot l${r.loop}"></i>Schleife ${r.loop}</button>`).join('')}${p.finished ? '' : `<button class="chip-btn${runIdx < 0 ? ' on' : ''}" data-act="report-run" data-i="-1"><i class="loop-dot l${p.loop}"></i>Aktuell</button>`}</div>` : ''}<p class="rp-sub">${esc(d.title)} · ${esc(dayLabel(Date.parse(d.from)) + ' ' + hm(Date.parse(d.from)))}${d.to ? ' – ' + esc(hm(Date.parse(d.to))) : ''}</p>${afterLoop && !p.finished ? `<p class="muted-s">${LOOPS[p.loop].hint} In jedem Schritt machst du mit „→ Schritte“ aus Ideen und Fragen neue Schritte.</p>` : ''}${reportHTML(d)}`,
+    actions: [{ label: 'Als PDF', keep: true, fn: () => printReport(d) }, ...(p.finished && afterLoop ? [{ label: 'Neue Prozessversion', fn: newVersion }] : []), { label: 'Fertig', cls: 'primary' }],
+  });
+  $('.dlg').classList.add('wide');
+}
+function printReport(d) {
+  const p = proj();
+  printHTML(`<header class="pr-head"><h1>${esc(p.title || 'Ohne Titel')}</h1><p>Bericht · ${esc(d.title)} · Version ${p.version}</p></header>${reportHTML(d)}`, `${p.title || 'Lazerfocus'} – Bericht`);
+}
+
+/* ---------- Zeitachse als PDF ---------- */
+function timelineHTML() {
+  recompute();
+  const p = proj();
+  const lines = t => t.split('\n').map(x => x.trim()).filter(Boolean);
+  const row = (s, depth) => {
+    const t = T.get(s.id);
+    const notes = NOTES.map(([k, h]) => lines(s[k]).length ? `<div class="pr-note"><b>${h}</b>${lines(s[k]).map(l => `<span>• ${esc(l)}</span>`).join('')}</div>` : '').join('');
+    const real = Math.round((t.end - t.start) / MIN);
+    return `<section class="pr-step d${Math.min(depth, 3)} st-${s.status}">
+      <div class="pr-time">${hm(t.start)}<br><span>${hm(t.end)}</span></div>
+      <div class="pr-num">${LABELS.get(s.id)}</div>
+      <div class="pr-main"><h3>${esc(s.title || 'Ohne Titel')}<em>${STATUS[s.status]}</em></h3>
+        ${s.desc ? `<p>${esc(s.desc)}</p>` : ''}
+        <p class="pr-meta">${s.status === 'done' && s.startedAt && s.doneAt ? `gebraucht ${fmtDur(real)} · geplant ${fmtDur(s.dur)}` : `Dauer ${fmtDur(real)}`}${s.prio ? ' · Priorität' : ''}</p>
+        ${notes}${s.log.length ? `<div class="pr-note"><b>Zwischenstand</b>${s.log.map(x => `<span>${esc(hm(Date.parse(x.at)))} · ${esc(x.text)}</span>`).join('')}</div>` : ''}
+        ${s.process ? `<div class="pr-proc">${window.LF && LF.docs && LF.docs.processHTML ? LF.docs.processHTML(s) : ''}</div>` : ''}
+      </div></section>` + s.children.map(c => row(c, depth + 1)).join('');
+  };
+  const tl = tally(p.steps);
+  return `<header class="pr-head"><h1>${esc(p.title || 'Ohne Titel')}</h1><p>${p.role === 'process' ? 'Prozess-Entwurf' : 'Ausführung'} · Version ${p.version} · Schleife ${p.loop} ${LOOPS[p.loop].name} · ${tl.done} von ${tl.n} erledigt · Stand ${esc(dayLabel(Date.now()) + ' ' + hm(Date.now()))}</p></header>${p.steps.map(s => row(s, 0)).join('')}`;
+}
+function exportPdf() { const p = proj(); printHTML(timelineHTML(), `${p.title || 'Lazerfocus'} – Zeitachse`); }
+function printHTML(html, title) {
+  const root = $('#printRoot');
+  root.innerHTML = `<div class="pr-doc">${html}</div>`;
+  const old = document.title;
+  document.title = title;   // wird beim Speichern als PDF zum Dateinamen
+  document.body.classList.add('printing');
+  const done = () => { document.body.classList.remove('printing'); document.title = old; root.innerHTML = ''; removeEventListener('afterprint', done); };
+  addEventListener('afterprint', done);
+  setTimeout(() => window.print(), 60);
+}
+
+/* ---------- Prozessversionen ---------- */
+const folderOf = p => p.folder || p.title || 'Ohne Titel';
+function newVersion() {
+  const src = proj();
+  const folder = folderOf(src);
+  const maxV = Math.max(...state.projects.filter(x => folderOf(x) === folder && x.role === src.role).map(x => x.version));
+  const copy = normProject(JSON.parse(JSON.stringify(src)));
+  const reid = s => { s.id = uid(); s.children.forEach(reid); };
+  copy.steps.forEach(reid);
+  Object.assign(copy, { id: uid(), version: maxV + 1, folder, loop: 1, runs: [], finished: null, archived: false, loopStartedAt: null, start: roundedNow(15).toISOString(), created: Date.now(), inbox: [] });
+  allOf(copy.steps).forEach(s => Object.assign(s, { status: 'open', startedAt: null, doneAt: null, worked: 0, pauses: [], log: [], ideas: '', questions: '', learnings: '', loopAdded: 1, at: null }));
+  pushHistory();
+  src.folder = folder; src.archived = true;
+  const partner = state.projects.find(x => x.id === src.link);
+  if (partner && partner.link === src.id) partner.link = copy.id;
+  state.projects.push(copy);
+  state.activeId = copy.id; ui.focus = null; ui.path = []; ui.trail = [];
+  save(); render(); haptic('done');
+  toast(`Version ${copy.version} erstellt · Version ${src.version} ist archiviert`);
+}
+
+/* ---------- Ausführung ⇄ Prozess ---------- */
+const partnerOf = p => (p && p.link ? state.projects.find(x => x.id === p.link) : null);
+function pairProject() {
+  const p = proj();
+  const partner = partnerOf(p);
+  if (partner) { switchProject(partner.id); return; }
+  if (p.role === 'process') { toast('Das ist bereits ein Prozess-Entwurf.'); return; }
+  openDialog({
+    title: 'Prozess parallel gestalten',
+    body: '<p>Neben dieser Ausführung entsteht ein Prozess-Entwurf: der verfeinerte Ablauf, der später als eigenes Projekt startet.</p><p class="muted-s">Wechseln: Schalter „Ausführung / Prozess“ oben oder Taste W. Schritte übernimmst du in der Fokus-Karte über ··· → „In Prozess übernehmen“. Die Seitenleiste zeigt den Entwurf neben der Arbeit.</p>',
+    actions: [{ label: 'Abbrechen' }, { label: 'Leer beginnen', fn: () => createPartner(false) }, { label: 'Ablauf kopieren', cls: 'primary', fn: () => createPartner(true) }],
+  });
+}
+function cloneForProcess(s) {
+  const c = normStep(JSON.parse(JSON.stringify(s)));
+  const reset = x => { Object.assign(x, { id: uid(), status: 'open', startedAt: null, doneAt: null, worked: 0, pauses: [], log: [], ideas: '', questions: '', learnings: '', loopAdded: 1, at: null }); x.children.forEach(reset); };
+  reset(c);
+  c.fromId = s.id;
+  return c;
+}
+function createPartner(copySteps) {
+  const p = proj();
+  const np = normProject(newProject(`${p.title || 'Ohne Titel'} · Prozess`));
+  Object.assign(np, { role: 'process', link: p.id, folder: folderOf(p), folderId: p.folderId });
+  if (copySteps && p.steps.length) np.steps = p.steps.map(cloneForProcess);
+  pushHistory();
+  p.link = np.id; p.folder = folderOf(p);
+  state.projects.push(np);
+  save(); render(); haptic('done');
+  openSide('proc');
+  toast('Prozess-Entwurf angelegt · rechts in der Seitenleiste');
+}
+function copyToProcess(id) {
+  const p = proj(), s = STEPS.get(id);
+  const partner = partnerOf(p);
+  if (!s) return;
+  if (!partner || p.role !== 'run') { pairProject(); return; }
+  const clone = cloneForProcess(s);
+  const existing = allOf(partner.steps).find(x => x.fromId === s.id);
+  pushHistory();
+  if (existing) Object.assign(existing, { title: clone.title, desc: clone.desc, dur: clone.dur, process: clone.process, attachments: clone.attachments, children: clone.children, prio: clone.prio });
+  else partner.steps.push(clone);
+  save(); renderSide(); haptic('done');
+  toast(existing ? 'Im Prozess aktualisiert' : 'In den Prozess übernommen', { label: 'Rückgängig', fn: undo });
+}
+function renderRoleSwitch() {
+  const p = proj(), partner = partnerOf(p);
+  for (const el of [$('#roleSwitch'), $('#roleSwitch2')]) {
+    el.hidden = !partner;
+    if (partner) $$('button', el).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === p.role)));
+  }
+}
+
+/* ---------- Seitenleiste: Unterlagen | Prozess ---------- */
+let docsMounted = false;
+function openSide(tab) {
+  const side = $('#side');
+  state.settings.side = { open: true, tab: tab || (state.settings.side && state.settings.side.tab) || 'docs' };
+  side.hidden = false;
+  document.body.classList.add('has-side');
+  if (!docsMounted && window.LF && LF.docs && LF.docs.mountPanel) { LF.docs.mountPanel($('#sideDocs')); docsMounted = true; }
+  renderSide();
+  save();
+  requestAnimationFrame(sideWidth);
+}
+function closeSide() {
+  const side = $('#side');
+  side.hidden = true; side.classList.remove('side--wide');
+  document.body.classList.remove('has-side');
+  state.settings.side = Object.assign({}, state.settings.side, { open: false });
+  save(); sideWidth();
+}
+function sideWidth() {
+  const side = $('#side');
+  const w = side.hidden || innerWidth <= 900 ? 0 : side.offsetWidth;
+  document.documentElement.style.setProperty('--side-open-w', w + 'px');
+  updateNow();
+}
+addEventListener('resize', () => requestAnimationFrame(sideWidth));
+$('#side').addEventListener('transitionend', e => { if (e.propertyName === 'width') sideWidth(); });
+function renderSide() {
+  const side = $('#side');
+  if (side.hidden) return;
+  const tab = (state.settings.side && state.settings.side.tab) || 'docs';
+  $$('.side-tab', side).forEach(b => b.setAttribute('aria-selected', String(b.dataset.v === tab)));
+  $('#sideDocs').hidden = tab !== 'docs';
+  $('#sideProc').hidden = tab !== 'proc';
+  if (tab === 'docs' && window.LF && LF.docs && LF.docs.onRender) LF.docs.onRender();
+  if (tab === 'proc') renderProcPanel();
+}
+function renderProcPanel() {
+  const p = proj(), partner = partnerOf(p), el = $('#sideProc');
+  if (!partner) {
+    el.innerHTML = `<div class="pp-empty"><h3>Prozess parallel gestalten</h3><p>${p.role === 'process' ? 'Dieser Entwurf ist mit keiner Ausführung verbunden.' : 'Während du hier abarbeitest, entsteht daneben der verfeinerte Ablauf als eigenes Projekt.'}</p>${p.role === 'run' ? '<button class="pill primary" data-act="proj-pair">Prozess-Entwurf anlegen</button>' : ''}</div>`;
+    return;
+  }
+  const editable = partner.role === 'process' && !partner.archived;
+  const rows = [];
+  const walk = (list, prefix, depth) => list.forEach((s, i) => {
+    const lab = prefix + (i + 1);
+    rows.push(`<li class="pp-row d${Math.min(depth, 3)}${s.fromId ? ' from-run' : ''}">
+      <span class="pp-num">${lab}</span>
+      ${editable && depth === 0 ? `<input class="pp-title" data-pf="title" data-sid="${s.id}" value="${esc(s.title)}" placeholder="Ohne Titel" aria-label="Titel">` : `<span class="pp-title ro">${esc(s.title || 'Ohne Titel')}</span>`}
+      ${editable && depth === 0 ? `<input class="pp-dur" data-pf="dur" data-sid="${s.id}" type="number" min="0" step="5" value="${s.dur}" aria-label="Dauer in Minuten"><span class="pp-unit">min</span>
+      <span class="pp-acts"><button class="pp-b" data-act="pp-up" data-sid="${s.id}" aria-label="Nach oben">↑</button><button class="pp-b" data-act="pp-down" data-sid="${s.id}" aria-label="Nach unten">↓</button><button class="pp-b danger" data-act="pp-del" data-sid="${s.id}" aria-label="Löschen">×</button></span>` : `<span class="pp-st st-${s.status}">${partner.role === 'run' ? STATUS[s.status] : fmtDur(s.dur)}</span>`}
+    </li>`);
+    walk(s.children, lab + '.', depth + 1);
+  });
+  walk(partner.steps, '', 0);
+  el.innerHTML = `<div class="pp-head"><div><span class="eyebrow">${partner.role === 'process' ? 'Prozess-Entwurf' : 'Ausführung'}</span><h3>${esc(partner.title || 'Ohne Titel')}</h3></div><button class="pill" data-act="proj-pair">Öffnen</button></div>
+    <ol class="pp-list">${rows.join('') || '<li class="pp-none">Noch keine Schritte.</li>'}</ol>
+    ${editable ? '<input class="pp-add" id="ppAdd" placeholder="+ Schritt hinzufügen (Enter)" aria-label="Neuen Schritt hinzufügen">' : ''}
+    <p class="muted-s pp-tip">${p.role === 'run' ? 'Schritte aus der Ausführung übernimmst du in der Fokus-Karte über ··· → „In Prozess übernehmen“.' : 'Links siehst du den Entwurf, hier die laufende Ausführung.'}</p>`;
+}
+function ppAct(act, sid) {
+  const partner = partnerOf(proj());
+  if (!partner) return;
+  const i = partner.steps.findIndex(x => x.id === sid);
+  if (i < 0) return;
+  pushHistory();
+  if (act === 'pp-del') partner.steps.splice(i, 1);
+  else { const j = i + (act === 'pp-up' ? -1 : 1); if (j < 0 || j >= partner.steps.length) { past.pop(); haptic('error'); return; } const [x] = partner.steps.splice(i, 1); partner.steps.splice(j, 0, x); }
+  save(); renderProcPanel(); haptic('soft');
+  if (act === 'pp-del') toast('Schritt aus dem Prozess entfernt', { label: 'Rückgängig', fn: undo });
+}
+
+/* ---------- Teilschritt-Vorschau beim Überfahren ---------- */
+let peekTimer;
+function showPeek(anchor) {
+  const row = anchor.closest('.step');
+  const s = row && STEPS.get(row.dataset.id);
+  if (!s || !s.children.length) return;
+  const pk = $('#peek');
+  pk.innerHTML = `<div class="pk-h"><span class="eyebrow">Teilschritte von ${LABELS.get(s.id)}</span></div><ol>${s.children.map(c => { const t = T.get(c.id); return `<li class="st-${c.status}"><span class="pk-sq">${LABELS.get(c.id)}</span><span class="pk-t">${esc(c.title || 'Ohne Titel')}</span><span class="pk-m">${t ? hm(t.start) : ''} · ${fmtDur(t ? (t.end - t.start) / MIN : c.dur)}</span></li>`; }).join('')}</ol><p class="pk-f">Klicken öffnet die Zeitachse der Teilschritte</p>`;
+  pk.hidden = false;
+  const r = anchor.getBoundingClientRect(), w = pk.offsetWidth, h = pk.offsetHeight;
+  // links neben der Zeile (vor Uhrzeit und Quadrat), damit der eigene Schritt sichtbar bleibt
+  const node = row.querySelector('.time') || row;
+  let left = node.getBoundingClientRect().left - w - 12;
+  if (left < 8) left = Math.min(innerWidth - w - 8, r.right + 12);
+  const top = Math.max(8, Math.min(innerHeight - h - 8, r.top + r.height / 2 - h / 2));
+  pk.style.left = left + 'px'; pk.style.top = top + 'px';
+}
+addEventListener('scroll', () => hidePeek(), true);
+function hidePeek() { clearTimeout(peekTimer); const pk = $('#peek'); if (pk) pk.hidden = true; }
+if (matchMedia('(hover: hover)').matches) {
+  document.addEventListener('mouseover', e => {
+    const a = e.target.closest && e.target.closest('.step [data-act="sub"]:not(.mini-axis)');
+    if (!a || drag.on) return;
+    clearTimeout(peekTimer);
+    peekTimer = setTimeout(() => showPeek(a), 180);
+  });
+  document.addEventListener('mouseout', e => {
+    const a = e.target.closest && e.target.closest('.step [data-act="sub"]:not(.mini-axis)');
+    if (a && !a.contains(e.relatedTarget)) hidePeek();
+  });
+}
+
+/* ---------- Schwebe-Menü (···) ---------- */
+function openPop(anchor, items) {
+  closePop();
+  const m = document.createElement('div');
+  m.className = 'menu pop'; m.id = 'pop';
+  m.innerHTML = items.filter(Boolean).map(it => it.sep ? '<div class="m-sep"></div>' : `<button class="m-item${it.danger ? ' danger' : ''}" data-act="${it.act}" data-id="${it.id || ''}">${esc(it.label)}${it.sub ? `<span class="m-sub">${esc(it.sub)}</span>` : ''}</button>`).join('');
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = Math.min(Math.max(8, r.right - w), innerWidth - w - 8) + 'px';
+  m.style.top = (r.bottom + 6 + h > innerHeight - 8 ? Math.max(8, r.top - h - 6) : r.bottom + 6) + 'px';
+  haptic('soft');
+}
+function closePop() { const m = $('#pop'); if (m) m.remove(); }
+function cardMenu(anchor, id) {
+  const s = STEPS.get(id);
+  if (!s || isLocked(s)) return;
+  openPop(anchor, [
+    { label: 'Nach oben', act: 'up', id, sub: 'Alt ↑' },
+    { label: 'Nach unten', act: 'down', id, sub: 'Alt ↓' },
+  ]);
+}
+function coachMenu(anchor, id) {
+  openPop(anchor, [
+    { label: '+5 Minuten', act: 'coach-extend', id },
+    { label: 'Öffnen', act: 'coach-open', id },
+    { label: 'Idee parken', act: 'coach-park', id, sub: 'I' },
+  ]);
+}
+
+/* ---------- Ideen und Fragen zu Schritten ---------- */
+function notesToSteps(id, field) {
+  const s = STEPS.get(id);
+  if (!s) return;
+  const items = s[field].split('\n').map(x => x.trim()).filter(Boolean);
+  if (!items.length) return;
+  openDialog({
+    title: field === 'ideas' ? 'Ideen zu Schritten' : 'Fragen zu Schritten',
+    body: `<p>Ausgewählte Zeilen werden neue Schritte direkt nach <b>${esc(LABELS.get(s.id) + ' ' + (s.title || 'Ohne Titel'))}</b>.</p><div class="ts-list">${items.map((t, i) => `<label class="ts-i"><input type="checkbox" data-i="${i}" checked><span>${esc(t)}</span></label>`).join('')}</div><label class="ts-i ts-opt"><input type="checkbox" id="tsRemove" checked><span>Übernommene Zeilen aus der Notiz entfernen</span></label>`,
+    actions: [{ label: 'Abbrechen' }, { label: 'Schritte anlegen', cls: 'primary', keep: true, fn: () => {
+      const pick = $$('#dialog .ts-list input:checked').map(x => +x.dataset.i);
+      const remove = $('#tsRemove') && $('#tsRemove').checked;
+      closeDialog();
+      if (!pick.length) return;
+      const L = locate(id);
+      mutate(() => {
+        const made = pick.map(i => newStep({ title: items[i], dur: 15, ideas: `Aus ${field === 'ideas' ? 'Idee' : 'Frage'} von ${LABELS.get(s.id)}`, loopAdded: proj().loop }));
+        L.list.splice(L.index + 1, 0, ...made);
+        if (remove) s[field] = items.filter((_, i) => !pick.includes(i)).join('\n');
+      });
+      haptic('done');
+      toast(`${pick.length} Schritt${pick.length > 1 ? 'e' : ''} angelegt`, { label: 'Rückgängig', fn: undo });
+    } }],
+  });
+}
+
+/* ---------- Projektverwaltung: Ordner (mit Titelbild) → Prozesse → Versionen ---------- */
+const ICON_GRID = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.5" y="1.5" width="4.5" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="8" y="1.5" width="4.5" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="1.5" y="8" width="4.5" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="8" y="8" width="4.5" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+const ICON_LIST = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M5 3h7.5M5 7h7.5M5 11h7.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="2" cy="3" r="1" fill="currentColor"/><circle cx="2" cy="7" r="1" fill="currentColor"/><circle cx="2" cy="11" r="1" fill="currentColor"/></svg>';
+const ICON_ARCHIVE = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="2" width="9" height="2.5" rx=".8" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M2.5 4.5V10h7V4.5M4.8 6.8h2.4" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
+const NONE = '__none';
+const folderById = id => (state.folders || []).find(f => f.id === id) || null;
+function normFolder(f) {
+  f = f && typeof f === 'object' ? f : {};
+  return { id: str(f.id) || uid(), name: str(f.name) || 'Ordner', cover: typeof f.cover === 'string' && f.cover.startsWith('data:image/') ? f.cover : '', created: +f.created || Date.now() };
+}
+// Prozesse eines Ordners: alle Projekte mit gleichem Prozess-Schlüssel (Versionen, Ausführung + Entwurf)
+function processesIn(folderId) {
+  const groups = new Map();
+  for (const p of state.projects) {
+    const fid = p.folderId && folderById(p.folderId) ? p.folderId : NONE;
+    if (fid !== folderId) continue;
+    const key = folderOf(p);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  return [...groups.entries()].map(([key, items]) => {
+    const live = items.filter(p => !p.archived);
+    const main = live.filter(p => p.role === 'run').sort((a, b) => b.version - a.version)[0] || live.sort((a, b) => b.version - a.version)[0] || items.slice().sort((a, b) => b.version - a.version)[0];
+    return { key, items, main, archived: items.filter(p => p.archived).sort((a, b) => b.version - a.version), partner: partnerOf(main), updated: Math.max(...items.map(p => p.updatedAt || p.created || 0)) };
+  }).sort((a, b) => b.updated - a.updated);
+}
+function openHome(folderId) {
+  ui.home = { folder: folderId === undefined ? (ui.home && ui.home.folder) || null : folderId };
+  $('#home').hidden = false;
+  document.body.classList.add('home-open');
+  closeMenus(); closePop(); hidePeek();
+  renderHome();
+}
+function closeHome() { $('#home').hidden = true; document.body.classList.remove('home-open'); }
+function renderHome() {
+  const el = $('#home');
+  if (el.hidden) return;
+  const view = state.settings.homeView === 'list' ? 'list' : 'grid';
+  const fid = ui.home && ui.home.folder;
+  const toggle = `<div class="seg h-view" role="group" aria-label="Ansicht"><button data-act="home-view" data-v="grid" aria-pressed="${view === 'grid'}" title="Kacheln">${ICON_GRID}</button><button data-act="home-view" data-v="list" aria-pressed="${view === 'list'}" title="Liste">${ICON_LIST}</button></div>`;
+  if (!fid) {
+    const folders = state.folders || [];
+    const loose = processesIn(NONE);
+    const tile = f => { const n = processesIn(f.id).length; return `<button class="h-folder" data-act="home-folder" data-id="${f.id}"><span class="hf-cover"${f.cover ? ` style="background-image:url('${f.cover}')"` : ''}>${f.cover ? '' : `<b>${esc((f.name || '?').slice(0, 1).toUpperCase())}</b>`}</span><span class="hf-body"><span class="hf-name">${esc(f.name)}</span><span class="hf-sub">${n} Prozess${n === 1 ? '' : 'e'}</span></span></button>`; };
+    el.innerHTML = `<div class="h-inner">
+      <div class="h-head"><div><span class="eyebrow">Lazerfocus</span><h1>Projekte</h1></div><button class="pill icon" data-act="home-close" aria-label="Schließen" title="Zurück zum Projekt (Esc)"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button></div>
+      <div class="h-bar">${toggle}<span class="spacer"></span><button class="pill" data-act="home-new-folder">+ Ordner</button><button class="pill primary" data-act="home-new-proj">+ Projekt</button></div>
+      <div class="h-grid ${view}">${folders.map(tile).join('')}${loose.length ? `<button class="h-folder loose" data-act="home-folder" data-id="${NONE}"><span class="hf-cover"><b>…</b></span><span class="hf-body"><span class="hf-name">Ohne Ordner</span><span class="hf-sub">${loose.length} Prozess${loose.length === 1 ? '' : 'e'}</span></span></button>` : ''}</div>
+      ${!folders.length ? '<p class="h-empty">Lege einen Ordner an, z. B. für einen Kunden oder ein Thema. Darin liegen deine Prozesse.</p>' : ''}
+    </div>`;
+    return;
+  }
+  const f = fid === NONE ? null : folderById(fid);
+  if (fid !== NONE && !f) { ui.home.folder = null; renderHome(); return; }
+  const procs = processesIn(fid);
+  const card = g => {
+    const p = g.main, t = tally(p.steps), pct = t.n ? Math.round(t.done / t.n * 100) : 0;
+    return `<article class="h-proc" data-act="open-pid" data-id="${p.id}" tabindex="0">
+      <div class="hp-top"><span class="hp-title">${esc(p.title || 'Ohne Titel')}</span>${p.version > 1 ? `<span class="m-tag">v${p.version}</span>` : ''}${p.role === 'process' ? '<span class="m-tag">Prozess</span>' : ''}</div>
+      <div class="hp-meta">${p.finished ? '<i class="loop-dot l3"></i>Lauf abgeschlossen' : `<i class="loop-dot l${p.loop}"></i>Schleife ${p.loop} · ${LOOPS[p.loop].name}`}</div>
+      <div class="hp-prog"><span class="bar"><i style="width:${pct}%"></i></span><span>${t.done}/${t.n}</span></div>
+      <div class="hp-foot"><span class="hp-date">${esc(dayLabel(g.updated))} ${hm(g.updated)}</span>${g.partner ? '<span class="hp-pair" title="Mit Prozess-Entwurf">⇄ Entwurf</span>' : ''}<span class="spacer"></span>
+        ${g.archived.length ? `<button class="hp-arch" data-act="arch-pop" data-key="${esc(g.key)}" title="Archivierte Versionen">${ICON_ARCHIVE}${g.archived.length}</button>` : ''}
+        <button class="hp-more" data-act="proc-menu" data-key="${esc(g.key)}" aria-label="Mehr">${ICON_MORE}</button></div>
+    </article>`;
+  };
+  el.innerHTML = `<div class="h-inner">
+    <div class="h-crumbs"><button data-act="home-folder" data-id="">Projekte</button><span class="sep">/</span><span>${esc(f ? f.name : 'Ohne Ordner')}</span><span class="spacer"></span><button class="pill icon" data-act="home-close" aria-label="Schließen" title="Zurück zum Projekt (Esc)"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button></div>
+    <div class="h-banner"${f && f.cover ? ` style="background-image:linear-gradient(to top, rgba(12,11,10,.92), rgba(12,11,10,.15) 70%), url('${f.cover}')"` : ''}>
+      ${f ? `<input class="h-fname" data-hf="name" value="${esc(f.name)}" aria-label="Ordnername" maxlength="80">` : '<h1 class="h-fname ro">Ohne Ordner</h1>'}
+      <span class="hf-sub">${procs.length} Prozess${procs.length === 1 ? '' : 'e'}</span>
+      ${f ? `<div class="h-banner-acts"><button class="pill" data-act="cover" data-id="${f.id}">${f.cover ? 'Titelbild ändern' : 'Titelbild wählen'}</button>${f.cover ? `<button class="pill" data-act="cover-del" data-id="${f.id}">Bild entfernen</button>` : ''}<button class="pill danger" data-act="folder-del" data-id="${f.id}">Ordner löschen</button></div>` : ''}
+    </div>
+    <div class="h-bar">${toggle}<span class="spacer"></span><button class="pill primary" data-act="home-new-proj" data-id="${f ? f.id : ''}">+ Projekt</button></div>
+    <div class="h-grid procs ${view}">${procs.map(card).join('') || '<p class="h-empty">Noch keine Prozesse in diesem Ordner. „+ Projekt“ legt einen an.</p>'}</div>
+  </div>`;
+}
+function homeNewFolder() {
+  openDialog({ title: 'Neuer Ordner', body: '<input class="park-in" placeholder="z. B. Kunde Müller, Marketing, Privat" maxlength="80">', actions: [{ label: 'Abbrechen' }, { label: 'Anlegen', cls: 'primary', fn: v => {
+    const name = (v || '').trim() || 'Neuer Ordner';
+    const f = normFolder({ name });
+    state.folders = (state.folders || []).concat(f);
+    save(); haptic('done');
+    openHome(f.id);
+  } }] });
+  setTimeout(() => { const i = $('#dialog input'); if (i) i.focus(); }, 30);
+}
+function homeNewProject(folderId) {
+  const p = newProject();
+  p.folderId = folderId && folderId !== NONE ? folderId : null;
+  pushHistory();
+  state.projects.push(p);
+  state.activeId = p.id; ui.focus = null; ui.path = []; ui.trail = [];
+  save(); closeHome(); render(); haptic('strong');
+  const t = $('#pTitle'); t.focus(); t.select();
+}
+function procItems(key, folderId) { return state.projects.filter(p => folderOf(p) === key && ((p.folderId && folderById(p.folderId) ? p.folderId : NONE) === folderId)); }
+function procMenu(anchor, key) {
+  const fid = ui.home.folder;
+  const items = procItems(key, fid);
+  openPop(anchor, [
+    { label: 'Öffnen', act: 'open-pid', id: (processesIn(fid).find(g => g.key === key) || {}).main?.id },
+    { sep: true },
+    ...(state.folders || []).filter(f => f.id !== fid).map(f => ({ label: 'Verschieben nach ' + f.name, act: 'proc-move', id: key + '\u0001' + f.id })),
+    fid !== NONE && { label: 'Aus dem Ordner nehmen', act: 'proc-move', id: key + '\u0001' + NONE },
+  ]);
+}
+function procMove(packed) {
+  const [key, to] = packed.split('\u0001');
+  const fid = ui.home.folder;
+  pushHistory();
+  procItems(key, fid).forEach(p => { p.folderId = to === NONE ? null : to; });
+  save(); renderHome(); haptic('done');
+  toast('Prozess verschoben', { label: 'Rückgängig', fn: () => { undo(); renderHome(); } });
+}
+function archPop(anchor, key) {
+  const items = procItems(key, ui.home.folder).filter(p => p.archived).sort((a, b) => b.version - a.version);
+  openPop(anchor, items.map(p => ({ label: `Version ${p.version}${p.role === 'process' ? ' · Entwurf' : ''}`, act: 'open-pid', id: p.id, sub: `${p.runs.length} Schleife${p.runs.length === 1 ? '' : 'n'}` })));
+}
+function openProject(id) {
+  if (!state.projects.some(p => p.id === id)) return;
+  closeHome();
+  if (id !== state.activeId) switchProject(id); else render();
+}
+// Titelbild: verkleinert (max. 1200 px breit) als JPEG speichern, damit Speicher und Abgleich klein bleiben
+function pickCover(folderId) {
+  const inp = $('#coverFile');
+  inp.onchange = () => {
+    const file = inp.files && inp.files[0];
+    inp.value = '';
+    if (!file) return;
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, 1200 / img.naturalWidth);
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.naturalWidth * scale); cv.height = Math.round(img.naturalHeight * scale);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url);
+      const f = folderById(folderId);
+      if (!f) return;
+      f.cover = cv.toDataURL('image/jpeg', .78);
+      save(); renderHome(); haptic('done');
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); toast('Das Bild konnte nicht gelesen werden.'); haptic('error'); };
+    img.src = url;
+  };
+  inp.click();
+}
+function deleteFolder(id) {
+  const f = folderById(id);
+  if (!f) return;
+  const n = processesIn(id).length;
+  openDialog({ title: 'Ordner löschen?', body: `<p>„${esc(f.name)}“ wird gelöscht. ${n ? `Die ${n} Prozess${n === 1 ? '' : 'e'} darin bleiben erhalten und landen unter „Ohne Ordner“.` : ''}</p>`, actions: [{ label: 'Abbrechen' }, { label: 'Löschen', cls: 'primary danger', fn: () => {
+    state.folders = state.folders.filter(x => x.id !== id);
+    state.projects.forEach(p => { if (p.folderId === id) p.folderId = null; });
+    save(); ui.home.folder = null; renderHome(); haptic('strong');
+    toast('Ordner gelöscht');
+  } }] });
+}
+
 /* ---------- Ereignisse ---------- */
 document.addEventListener('click', e => {
   const a = e.target.closest('[data-act]');
   if (!e.target.closest('.menu-wrap')) closeMenus();
+  if (!e.target.closest('#pop, [data-act="card-menu"], [data-act="coach-menu"]')) closePop();
   if (pk.target && !e.target.closest('#picker, [data-act="pick"]')) { closePicker(); if (!a) return; }
   if (a) { handleAct(a.dataset.act, a, e); return; }
   if (e.target.id === 'dialog') { closeDialog(); return; }
@@ -1501,11 +2228,45 @@ document.addEventListener('click', e => {
 
 function handleAct(act, el) {
   const row = el.closest('.step');
-  const id = row && row.dataset.id;
+  const id = el.dataset.id || (row && row.dataset.id);
+  if (el.closest('#pop')) closePop();
   const axis = el.closest('.axis');
   const key = axis ? axis.dataset.axis : 'main';
   switch (act) {
     case 'cycle': cycle(id, el); break;
+    case 'card-menu': cardMenu(el, id); break;
+    case 'home': openHome(); break;
+    case 'home-close': closeHome(); break;
+    case 'home-folder': ui.home.folder = el.dataset.id || null; renderHome(); haptic('soft'); break;
+    case 'home-view': state.settings.homeView = el.dataset.v; save(); renderHome(); haptic('soft'); break;
+    case 'home-new-folder': homeNewFolder(); break;
+    case 'home-new-proj': homeNewProject(el.dataset.id || (ui.home && ui.home.folder)); break;
+    case 'open-pid': openProject(id); break;
+    case 'proc-menu': procMenu(el, el.dataset.key); break;
+    case 'proc-move': procMove(id); break;
+    case 'arch-pop': archPop(el, el.dataset.key); break;
+    case 'cover': pickCover(id); break;
+    case 'cover-del': { const f = folderById(id); if (f) { f.cover = ''; save(); renderHome(); } break; }
+    case 'folder-del': deleteFolder(id); break;
+    case 'coach-menu': coachMenu(el, id); break;
+    case 'interrupt': interrupt(id); break;
+    case 'break': case 'coach-break': if (state.brk) endBreak(); else startBreak(); break;
+    case 'to-proc': copyToProcess(id); break;
+    case 'new-doc': if (window.LF && LF.docs && LF.docs.newDoc) LF.docs.newDoc(id); else { openSide('docs'); if (window.LF && LF.docs && LF.docs.openAttach) LF.docs.openAttach(id); } break;
+    case 'to-steps': notesToSteps(id, el.dataset.f); break;
+    case 'side-docs': openSide('docs'); if (window.LF && LF.docs && LF.docs.openAttach && id) LF.docs.openAttach(id); break;
+    case 'side-toggle': if ($('#side').hidden) openSide(); else closeSide(); break;
+    case 'side-tab': openSide(el.dataset.v); break;
+    case 'side-close': closeSide(); break;
+    case 'loop': showLoop(); break;
+    case 'export-pdf': closeMenus(); exportPdf(); break;
+    case 'report': closeMenus(); showReport(-1); break;
+    case 'report-run': showReport(+el.dataset.i); break;
+    case 'proj-version': closeMenus(); newVersion(); break;
+    case 'proj-pair': closeMenus(); pairProject(); break;
+    case 'role': { const pt = partnerOf(proj()); if (pt && el.dataset.v !== proj().role) switchProject(pt.id); break; }
+    case 'pp-up': case 'pp-down': case 'pp-del': ppAct(act, el.dataset.sid); break;
+    case 'arch-toggle': ui.archOpen = ui.archOpen || new Set(); if (ui.archOpen.has(el.dataset.folder)) ui.archOpen.delete(el.dataset.folder); else ui.archOpen.add(el.dataset.folder); renderProjMenu(); break;
     case 'status': setStatus(id, el.dataset.v); break;
     case 'prio': togglePrio(id); break;
     case 'ins': insertAt(key, +el.dataset.index); break;
@@ -1526,7 +2287,7 @@ function handleAct(act, el) {
     case 'park-list': closeMenus(); showPark(); break;
     case 'park-new': closeMenus(); openPark(); break;
     case 'park-step': case 'park-del': parkAct(act, el.dataset.pid); break;
-    case 'review': closeMenus(); showReview(); break;
+    case 'review': closeMenus(); showReport(-1); break;
     case 'backup': exportData(); break;
     case 'unfold': el.dataset.ids.split(',').forEach(x => ui.unfolded.add(x)); render(); haptic('soft'); break;
     case 'fold-toggle': { const p = proj(); p.foldDone = !p.foldDone; ui.unfolded.clear(); save(); render(); haptic('tap'); break; }
@@ -1537,7 +2298,7 @@ function handleAct(act, el) {
     case 'unfocus': clearFocus(); haptic('soft'); break;
     case 'dur': {
       const s = STEPS.get(id);
-      if (!s || s.children.length) break;
+      if (!s || s.children.length || readOnly()) break;
       const d = +el.dataset.d;
       const v = Math.max(0, Math.round(((s.dur || 0) + d) / 5) * 5);
       if (v === s.dur) { haptic('error'); break; }
@@ -1576,7 +2337,7 @@ function handleAct(act, el) {
     case 'toast': { const fn = toastFn; $('#toast').classList.remove('show'); if (fn) fn(); break; }
     case 'dlg': {
       const a = dlgActions[+el.dataset.i];
-      const inp = $('#dialog input'), v = inp ? inp.value : undefined;  // Eingabe vor dem Schließen sichern
+      const inp = $('#dialog input:not([type=checkbox]), #dialog textarea'), v = inp ? inp.value : undefined;  // Eingabe vor dem Schließen sichern
       if (!a || !a.keep) closeDialog();
       if (a && a.fn) a.fn(v);
       break;
@@ -1587,13 +2348,15 @@ function handleAct(act, el) {
 // Texteingaben: Modell direkt ändern, ohne neu zu zeichnen
 document.addEventListener('focusin', e => {
   const t = e.target;
-  if (t.matches('[data-f], #pTitle, #pStart')) pendingSnap = snap();
+  if (t.matches('[data-f], [data-pf], #pTitle, #pStart')) pendingSnap = snap();
   const row = t.closest && t.closest('.step');
+  if (t.matches && t.matches('button')) return;   // Klick auf Chips/Knöpfe nicht in Fokus umwandeln (sonst verschwindet der Knopf vor dem Klick)
   if (row && !(ui.focus && ui.focus.id === row.dataset.id)) setFocus(row.closest('.axis').dataset.axis, row.dataset.id, { scroll: false });
 });
 document.addEventListener('input', e => {
   const t = e.target;
   if (t.id === 'pTitle') {
+    if (readOnly()) return;
     commitPending();
     proj().title = t.value;
     $('#projName').textContent = t.value || 'Ohne Titel';
@@ -1607,11 +2370,20 @@ document.addEventListener('input', e => {
     proj().start = new Date(ms).toISOString();
     save(); updateTimes(); return;
   }
+  if (t.dataset.hf === 'name') { const f = folderById(ui.home.folder); if (f) { f.name = t.value; save(); } return; }
+  if (t.dataset.pf) {
+    const partner = partnerOf(proj()), ps = partner && partner.steps.find(x => x.id === t.dataset.sid);
+    if (!ps) return;
+    commitPending();
+    if (t.dataset.pf === 'dur') { if (t.value === '') return; ps.dur = Math.max(0, Math.round(+t.value || 0)); } else ps.title = t.value;
+    save(); return;
+  }
   const f = t.dataset.f;
   const row = t.closest('.step');
   if (!f || !row) return;
   const s = STEPS.get(row.dataset.id);
   if (!s) return;
+  if (readOnly() || (isLocked(s) && (f === 'title' || f === 'desc'))) return;
   commitPending();
   if (f === 'dur') {
     if (t.value === '') return;
@@ -1646,6 +2418,9 @@ document.addEventListener('keydown', e => {
   const t = e.target;
   const typing = t.matches && t.matches('input, textarea, [contenteditable]');
   if (e.key === 'Escape') {
+    if ($('#pop')) { closePop(); return; }
+    if (!$('#home').hidden && $('#dialog').hidden) { closeHome(); return; }
+    hidePeek();
     if (pk.target) { closePicker(); return; }
     if (!$('#dialog').hidden) { closeDialog(); return; }
     if ($$('.menu').some(m => !m.hidden)) { closeMenus(); return; }
@@ -1656,10 +2431,17 @@ document.addEventListener('keydown', e => {
   }
   if (e.key === 'Enter' && t.id === 'parkIn') { e.preventDefault(); const v = t.value; closeDialog(); savePark(v); return; }
   if (!$('#dialog').hidden) return;
+  if (!$('#home').hidden) return;
   if (pk.target) { if (e.key === 'Enter' && t.classList && t.classList.contains('pk-in')) { e.preventDefault(); pickerApply(); } return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !typing) {
     e.preventDefault();
     if (e.shiftKey) redo(); else undo();
+    return;
+  }
+  if (typing && e.key === 'Enter' && t.id === 'ppAdd') {
+    e.preventDefault();
+    const v = t.value.trim(), partner = partnerOf(proj());
+    if (v && partner) { pushHistory(); partner.steps.push(normStep({ title: v, dur: 15, loopAdded: 1 })); save(); renderProcPanel(); haptic('soft'); setTimeout(() => { const n = $('#ppAdd'); if (n) n.focus(); }, 0); }
     return;
   }
   if (typing) {
@@ -1699,6 +2481,9 @@ document.addEventListener('keydown', e => {
     case 't': case 'T': if (f) openSub(f.axis, f.id); break;
     case 'j': case 'J': jumpToNow(); break;
     case 'i': case 'I': e.preventDefault(); openPark(); break;
+    case 'b': case 'B': if (state.brk) endBreak(); else if (leavesOf(proj().steps).some(x => x.status === 'doing')) startBreak(); else toast('Keine laufende Aufgabe zum Pausieren.'); break;
+    case 'w': case 'W': { const pt = partnerOf(proj()); if (pt) switchProject(pt.id); else pairProject(); break; }
+    case 'd': case 'D': if ($('#side').hidden) openSide('docs'); else closeSide(); break;
     case '?': showKeys(); break;
   }
 });
@@ -1760,9 +2545,25 @@ window.LF = {
     if (act && act.closest && act.closest('.step, .axis-head')) updateTimes(); else render();
   },
   onSave: null, onMenu: null,
+  get meta() { return { folders: state.folders || [], updatedAt: state.metaUpdatedAt || 0 }; },
+  adoptMeta(data, ts) {
+    state.folders = Array.isArray(data && data.folders) ? data.folders.map(normFolder) : [];
+    state.metaUpdatedAt = ts; knownMeta = JSON.stringify(state.folders);
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* gesperrt */ }
+    renderHome();
+  },
+  // für docs.js (Unterlagen & Prozessbeschreibung)
+  proj, step: id => STEPS.get(id) || null, labelOf: id => LABELS.get(id) || '', focusId: () => (ui.focus ? ui.focus.id : null),
+  allSteps: () => allOf(proj().steps), mutate, touch: () => { commitPending(); save(); }, render, esc, uid,
+  isLocked, readOnly, openSide, closeSide, get sideEl() { return $('#side'); }, print: printHTML,
 };
+// docs.js wird nach app.js geladen: Panel einhängen, sobald es da ist
+addEventListener('load', () => {
+  if (state.settings.side && state.settings.side.open) openSide(state.settings.side.tab); else if (window.LF.docs) render();
+});
 
 /* ---------- Start ---------- */
+knownMeta = JSON.stringify(state.folders);
 if (!state.firstUse) state.firstUse = Date.now();
 if (!state.persistAsked && navigator.storage && navigator.storage.persist) { state.persistAsked = true; navigator.storage.persist().catch(() => {}); save(); }
 updateBackupChip();

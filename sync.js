@@ -40,8 +40,11 @@ async function syncNow(first) {
   if (busy) { again = true; return; }
   busy = true; status = 'gleicht ab …';
   try {
-    const { data: rows, error } = await sb.from('projects').select('id,data,updated_at,deleted');
+    const { data: all, error } = await sb.from('projects').select('id,data,updated_at,deleted');
     if (error) throw error;
+    // Ordner (Projektverwaltung) liegen in einer eigenen Zeile „__meta“
+    const metaRow = all.find(r => r.id === '__meta');
+    const rows = all.filter(r => r.id !== '__meta');
     const st = S(), tomb = st.tomb || {};
     const remote = new Map(rows.map(r => [r.id, { data: r.data, ts: Date.parse(r.updated_at), deleted: r.deleted }]));
     const live = rows.filter(r => !r.deleted);
@@ -55,6 +58,7 @@ async function syncNow(first) {
       }));
       if (choice === 'cloud') {
         LF.adopt(live.map(r => Object.assign({}, r.data, { id: r.id, updatedAt: Date.parse(r.updated_at) })), st.projects.filter(p => !remote.has(p.id) || remote.get(p.id).deleted).map(p => p.id));
+        if (metaRow) LF.adoptMeta(metaRow.data, Date.parse(metaRow.updated_at));
         cs().linked = true; status = 'verbunden'; busy = false; return;
       }
     }
@@ -74,6 +78,9 @@ async function syncNow(first) {
     }
     for (const [id, t] of Object.entries(tomb)) if (!remote.has(id)) push.push({ id, data: {}, ts: t, deleted: true });
 
+    const lm = LF.meta, rts = metaRow ? Date.parse(metaRow.updated_at) : 0;
+    if (metaRow && rts > lm.updatedAt) LF.adoptMeta(metaRow.data, rts);
+    else if (lm.updatedAt > rts) push.push({ id: '__meta', data: { folders: lm.folders }, ts: lm.updatedAt, deleted: false });
     if (push.length) {
       const { error: e2 } = await sb.from('projects').upsert(push.map(x => ({ id: x.id, data: x.data, updated_at: new Date(x.ts).toISOString(), deleted: x.deleted })), { onConflict: 'user_id,id' });
       if (e2) throw e2;
@@ -111,6 +118,8 @@ function open() {
 }
 
 LF.label = () => status;
+// für docs.js: Dateien in Supabase Storage (Bucket „files“)
+LF.cloud = { get sb() { return sb; }, get user() { return user; } };
 LF.open = open;
 LF.onSave = () => { if (!user) return; clearTimeout(timer); timer = setTimeout(() => syncNow(), 1500); };
 document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
