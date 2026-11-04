@@ -2652,7 +2652,7 @@ window.addEventListener('storage', e => {
 state.projects.forEach(p => known.set(p.id, projJson(p)));
 window.LF = {
   get state() { return state; },
-  dialog: openDialog, toast, haptic,
+  dialog: openDialog, closeDialog, toast, haptic,
   // Fremde Projekte übernehmen: upserts = Liste, removeIds = zu löschende IDs
   adopt(upserts, removeIds) {
     const keep = state.activeId;

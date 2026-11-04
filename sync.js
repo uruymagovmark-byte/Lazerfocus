@@ -93,28 +93,64 @@ async function syncNow(first) {
   if (again) { again = false; syncNow(); }
 }
 
+const $id = id => document.getElementById(id);
+const clean = t => String(t || '').replace(/[<>&"]/g, '');
+function onEnter(id) { setTimeout(() => { const el = $id(id); if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); const b = document.querySelector('.dlg-actions .primary'); if (b) b.click(); } }); }, 30); }
+
+// Anmeldung mit E-Mail + Passwort: braucht keine E-Mail (umgeht die Sendegrenze von Supabase)
+async function pwLogin() {
+  const email = ($id('lfEmail').value || '').trim(), pw = $id('lfPw').value || '';
+  if (!email || !pw) return LF.toast('Bitte E-Mail und Passwort eingeben');
+  if (!sb) return LF.toast('Cloud noch nicht geladen');
+  LF.closeDialog();   // zuerst schließen, damit das Fenster „Cloud gefunden“ nicht mit geschlossen wird
+  const { error } = await sb.auth.signInWithPassword({ email, password: pw });
+  if (error) LF.toast(/invalid/i.test(error.message) ? 'E-Mail oder Passwort falsch. Hast du auf dem anderen Gerät schon ein Passwort festgelegt?' : 'Fehler: ' + error.message);
+}
+function setPassword() {
+  LF.dialog({ title: 'Passwort festlegen', body: '<p>Damit meldest du dich auf anderen Geräten ohne E-Mail an. Mindestens 8 Zeichen.</p><input class="park-in" type="password" id="lfPw1" placeholder="Neues Passwort" autocomplete="new-password"><input class="park-in" type="password" id="lfPw2" placeholder="Passwort wiederholen" autocomplete="new-password">', actions: [
+    { label: 'Abbrechen' },
+    { label: 'Speichern', cls: 'primary', keep: true, fn: async () => {
+      const a = $id('lfPw1').value, b = $id('lfPw2').value;
+      if (a.length < 8) return LF.toast('Das Passwort braucht mindestens 8 Zeichen.');
+      if (a !== b) return LF.toast('Die beiden Passwörter sind nicht gleich.');
+      if (!sb || !user) return LF.toast('Du bist nicht angemeldet.');
+      const { error } = await sb.auth.updateUser({ password: a });
+      if (error) return LF.toast('Fehler: ' + error.message);
+      LF.closeDialog();
+      LF.toast('Passwort gespeichert. Auf dem anderen Gerät: „Mit Passwort anmelden“.');
+    } },
+  ] });
+  setTimeout(() => { const el = $id('lfPw1'); if (el) el.focus(); }, 30);
+  onEnter('lfPw2');
+}
+
 function open() {
   if (!ready) {
     LF.dialog({ title: 'Cloud-Sync', body: '<p>Noch nicht eingerichtet. In <code>config.js</code> fehlen URL und anon key aus Supabase.</p>', actions: [{ label: 'OK', cls: 'primary' }] });
     return;
   }
   if (user) {
-    LF.dialog({ title: 'Cloud-Sync', body: `<p>Angemeldet als ${user.email.replace(/[<>&]/g, '')}.<br>Status: ${status}</p>`, actions: [
+    LF.dialog({ title: 'Cloud-Sync', body: `<p>Angemeldet als ${clean(user.email)}.<br>Status: ${status}</p><p class="muted-s">Tipp: Lege ein Passwort fest, dann meldest du dich auf anderen Geräten ohne E-Mail-Link an.</p>`, actions: [
       { label: 'Abmelden', fn: async () => { await sb.auth.signOut(); cs().linked = false; } },
+      { label: 'Passwort festlegen …', keep: true, fn: () => { LF.closeDialog(); setPassword(); } },
       { label: 'Jetzt abgleichen', cls: 'primary', fn: () => syncNow(true) },
     ] });
     return;
   }
-  LF.dialog({ title: 'Cloud-Login', body: '<p>E-Mail eingeben. Du bekommst einen Link zum Anmelden (kein Passwort).</p><input type="email" placeholder="name@example.com" autocomplete="email" style="width:100%">', actions: [
+  LF.dialog({ title: 'Cloud-Login', body: '<input class="park-in" type="email" id="lfEmail" placeholder="E-Mail" autocomplete="email"><input class="park-in" type="password" id="lfPw" placeholder="Passwort (wenn schon festgelegt)" autocomplete="current-password"><p class="muted-s">Mit Passwort: „Mit Passwort anmelden“, ohne E-Mail. Ohne Passwort: „Link senden“, du bekommst einen Link per E-Mail (Supabase erlaubt nur 2 E-Mails pro Stunde).</p>', actions: [
     { label: 'Abbrechen' },
-    { label: 'Link senden', cls: 'primary', fn: async email => {
-      email = (email || '').trim();
+    { label: 'Link senden', keep: true, fn: async () => {
+      const email = ($id('lfEmail').value || '').trim();
       if (!email) return LF.toast('Bitte E-Mail eingeben');
       if (!sb) return LF.toast('Cloud noch nicht geladen');
       const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+      if (!error) LF.closeDialog();
       LF.toast(error ? 'Fehler: ' + error.message : 'Link gesendet. Bitte E-Mail öffnen.');
     } },
+    { label: 'Mit Passwort anmelden', cls: 'primary', keep: true, fn: pwLogin },
   ] });
+  setTimeout(() => { const el = $id('lfEmail'); if (el) el.focus(); }, 30);
+  onEnter('lfPw');
 }
 
 LF.label = () => status;
