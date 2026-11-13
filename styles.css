@@ -1187,3 +1187,8 @@ body.home-open .coach, body.home-open .side { display: none !important; }
 .sel:focus { border-color: var(--fg-2); }
 .mg-l { display: flex; flex-direction: column; gap: var(--s-1); margin-bottom: var(--s-3); }
 .mg-l > span { font: 500 10.5px/1 var(--f-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+
+/* Vorlage (gesperrtes Projekt) */
+.hp-lock { display: inline-flex; align-items: center; gap: 4px; }
+/* Kopfzeile samt ···-Menü über der Projektverwaltung (die liegt sonst mit z-index 42 darüber) */
+body.home-open .top { z-index: 45; }

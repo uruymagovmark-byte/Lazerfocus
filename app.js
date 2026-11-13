@@ -88,6 +88,7 @@ function normProject(p) {
     folderId: str(p.folderId) || null, // Projektordner in der Projektverwaltung
     version: +p.version > 0 ? Math.round(+p.version) : 1,
     archived: !!p.archived,
+    template: !!p.template,           // als Vorlage gesperrt: nur lesen, „Neues Projekt aus Vorlage“
     role: p.role === 'process' ? 'process' : 'run',   // Ausführung oder Prozess-Entwurf
     link: str(p.link) || null,        // Partner-Projekt (Ausführung ⇄ Prozess)
     created: +p.created || Date.now(),
@@ -201,7 +202,7 @@ function redo() {
   past.push(snap()); restore(future.pop()); haptic('soft'); toast('Wiederhergestellt');
 }
 function mutate(fn) {
-  if (readOnly()) { toast('Archivierte Version: nur lesen.'); haptic('error'); return; }
+  if (readOnly()) { toast(proj().template ? 'Vorlage: nur lesen.' : 'Archivierte Version: nur lesen.'); haptic('error'); return; }
   pushHistory(); fn(); save(); render();
 }
 // Rückgängig für genau diese Aktion (auch wenn danach noch etwas passiert ist)
@@ -310,7 +311,7 @@ function reidAll(list) {
 }
 function leavesOf(steps, out = []) { for (const s of steps) { if (s.children.length) leavesOf(s.children, out); else out.push(s); } return out; }
 function allOf(steps, out = []) { for (const s of steps) { out.push(s); allOf(s.children, out); } return out; }
-const readOnly = () => !!(proj().archived || proj().finished);   // archiviert oder Lauf abgeschlossen: nur lesen
+const readOnly = () => !!(proj().archived || proj().finished || proj().template);   // archiviert, Lauf abgeschlossen oder Vorlage: nur lesen
 // Schritte aus früheren Schleifen sind nur gekennzeichnet (der Bericht dieser Schleife ist gespeichert), die aktuelle Schleife ist voll bearbeitbar
 const isOld = s => !!(s && s.loopAdded < proj().loop);
 const isLocked = s => readOnly();
@@ -539,7 +540,8 @@ function renderHead() {
   lb.innerHTML = p.finished ? `<i class="loop-dot l3"></i>Lauf abgeschlossen` : `<i class="loop-dot l${p.loop}"></i>Schleife ${p.loop} · ${LOOPS[p.loop].name}`;
   const ab = $('#archBanner');
   ab.hidden = !readOnly();
-  if (readOnly()) ab.innerHTML = `${ICON_LOCK} ${p.archived ? `Archivierte Version ${p.version}` : 'Lauf abgeschlossen'}${p.runs.length ? ` · ${p.runs.length} Schleife${p.runs.length > 1 ? 'n' : ''}` : ''} · nur lesen${p.finished && !p.archived ? ' · <button class="note-act" data-act="proj-version">Neue Prozessversion</button>' : ''}`;
+  if (readOnly() && p.template && !p.archived) ab.innerHTML = `${ICON_LOCK} Vorlage · nur lesen · <button class="note-act" data-act="proj-from-tpl" data-id="${p.id}">Neues Projekt aus Vorlage</button><button class="note-act" data-act="proj-lock" data-id="${p.id}">Entsperren</button>`;
+  else if (readOnly()) ab.innerHTML = `${ICON_LOCK} ${p.archived ? `Archivierte Version ${p.version}` : 'Lauf abgeschlossen'}${p.runs.length ? ` · ${p.runs.length} Schleife${p.runs.length > 1 ? 'n' : ''}` : ''} · nur lesen${p.finished && !p.archived ? ' · <button class="note-act" data-act="proj-version">Neue Prozessversion</button>' : ''}`;
   $('#roleTag').hidden = p.role !== 'process';
   $('#verTag').hidden = p.version < 2;
   $('#verTag').textContent = 'Version ' + p.version;
@@ -912,16 +914,32 @@ function createProject() {
   const t = $('#pTitle');
   t.focus(); t.select();
 }
-function duplicateProject() {
-  const src = proj();
+// Duplizieren (auch „Neues Projekt aus Vorlage“): Kopie startet frisch – alles Offen, Zeiten weg, Start = jetzt, Notizen bleiben
+function duplicateProject(id, fromTpl) {
+  const src = state.projects.find(p => p.id === id) || proj();
   const copy = normProject(JSON.parse(JSON.stringify(src)));
-  copy.id = uid(); copy.title = src.title + ' (Kopie)'; copy.created = Date.now();
   reidAll(copy.steps);
+  const taken = new Set(state.projects.map(folderOf));
+  let title = (src.title || 'Ohne Titel') + ' (Kopie)', n = 2;
+  while (taken.has(title)) title = `${src.title || 'Ohne Titel'} (Kopie ${n++})`;
+  Object.assign(copy, { id: uid(), title, folder: '', version: 1, loop: 1, runs: [], finished: null, archived: false, template: false, link: null, loopStartedAt: null, start: roundedNow().toISOString(), target: null, created: Date.now(), updatedAt: 0 });
+  allOf(copy.steps).forEach(s => Object.assign(s, { status: 'open', startedAt: null, doneAt: null, at: null, worked: 0, pauses: [], log: [], loopAdded: 1 }));
+  const before = snap();
   pushHistory();
   state.projects.push(copy);
   state.activeId = copy.id; ui.focus = null; ui.path = []; ui.trail = [];
-  save(); render(); haptic('strong');
-  toast('Projekt dupliziert');
+  save(); closeHome(); render(); haptic('strong');
+  toast(fromTpl ? 'Neues Projekt aus Vorlage' : 'Projekt dupliziert', { label: 'Rückgängig', fn: undoTo(before) });
+  if (fromTpl) { const t = $('#pTitle'); t.focus(); t.select(); }
+}
+// Als Vorlage sperren / entsperren (geht auch, wenn das Projekt gerade nur lesbar ist)
+function toggleTemplate(id) {
+  const p = state.projects.find(x => x.id === id) || proj();
+  if (p.archived) { toast('Archivierte Versionen sind schon gesperrt.'); haptic('error'); return; }
+  pushHistory();
+  p.template = !p.template;
+  save(); render(); renderHome(); haptic('done');
+  toast(p.template ? 'Als Vorlage gesperrt · nur lesen' : 'Vorlage entsperrt · wieder bearbeitbar');
 }
 function deleteProject() {
   const p = proj();
@@ -1001,10 +1019,11 @@ function renderProjMenu() {
   const p = proj();
   m.innerHTML = h + '<div class="m-sep"></div>'
     + '<button class="m-item" data-act="proj-new">Neues Projekt</button>'
-    + `<button class="m-item" data-act="proj-version">Neue Prozessversion <span class="m-sub">archiviert v${p.version}</span></button>`
+    + (p.template ? '<button class="m-item" data-act="proj-from-tpl">Neues Projekt aus Vorlage</button>' : `<button class="m-item" data-act="proj-version">Neue Prozessversion <span class="m-sub">archiviert v${p.version}</span></button>`)
     + (p.role === 'run' ? `<button class="m-item" data-act="proj-pair">${partnerOf(p) ? 'Zum Prozess-Entwurf' : 'Prozess parallel gestalten …'} <span class="m-sub">W</span></button>` : (partnerOf(p) ? '<button class="m-item" data-act="proj-pair">Zur Ausführung <span class="m-sub">W</span></button>' : ''))
     + '<button class="m-item" data-act="merge-proj">In anderes Projekt einfügen …</button>'
     + '<button class="m-item" data-act="proj-dup">Projekt duplizieren</button>'
+    + (p.archived ? '' : `<button class="m-item" data-act="proj-lock">${p.template ? 'Vorlage entsperren' : 'Als Vorlage sperren'}</button>`)
     + '<button class="m-item danger" data-act="proj-del">Projekt löschen …</button>';
 }
 function renderMoreMenu() {
@@ -1014,6 +1033,9 @@ function renderMoreMenu() {
     + `<button class="m-item" data-act="cloud">Cloud-Sync <span class="m-sub">${esc(window.LF && LF.label ? LF.label() : 'aus')}</span></button>`
     + `<span class="m-note">Zuletzt gesichert: ${state.lastExport ? dayLabel(state.lastExport) + ' ' + hm(state.lastExport) : 'noch nie'}</span>`
     + '<div class="m-sep"></div><span class="m-label">Projekt</span>'
+    + (proj().template ? '<button class="m-item" data-act="proj-from-tpl">Neues Projekt aus Vorlage</button>' : '')
+    + '<button class="m-item" data-act="proj-dup">Projekt duplizieren</button>'
+    + (proj().archived ? '' : `<button class="m-item" data-act="proj-lock">${proj().template ? 'Vorlage entsperren' : 'Als Vorlage sperren'}</button>`)
     + '<button class="m-item" data-act="loop">Schleifen …</button>'
     + '<button class="m-item" data-act="report">Bericht: Ideen & Fragen …</button>'
     + '<button class="m-item" data-act="export-pdf">Zeitachse als PDF</button>'
@@ -2229,7 +2251,7 @@ function renderHome() {
   const card = g => {
     const p = g.main, t = tally(p.steps), pct = t.n ? Math.round(t.done / t.n * 100) : 0;
     return `<article class="h-proc" data-act="open-pid" data-id="${p.id}" tabindex="0">
-      <div class="hp-top"><span class="hp-title">${esc(p.title || 'Ohne Titel')}</span>${p.version > 1 ? `<span class="m-tag">v${p.version}</span>` : ''}${p.role === 'process' ? '<span class="m-tag">Prozess</span>' : ''}</div>
+      <div class="hp-top"><span class="hp-title">${esc(p.title || 'Ohne Titel')}</span>${p.version > 1 ? `<span class="m-tag">v${p.version}</span>` : ''}${p.role === 'process' ? '<span class="m-tag">Prozess</span>' : ''}${p.template ? `<span class="m-tag hp-lock" title="Vorlage · gesperrt">${ICON_LOCK} Vorlage</span>` : ''}</div>
       <div class="hp-meta">${p.finished ? '<i class="loop-dot l3"></i>Lauf abgeschlossen' : `<i class="loop-dot l${p.loop}"></i>Schleife ${p.loop} · ${LOOPS[p.loop].name}`}</div>
       <div class="hp-prog"><span class="bar"><i style="width:${pct}%"></i></span><span>${t.done}/${t.n}</span></div>
       <div class="hp-foot"><span class="hp-date">${esc(dayLabel(g.updated))} ${hm(g.updated)}</span>${g.partner ? '<span class="hp-pair" title="Mit Prozess-Entwurf">⇄ Entwurf</span>' : ''}<span class="spacer"></span>
@@ -2270,10 +2292,13 @@ function homeNewProject(folderId) {
 function procItems(key, folderId) { return state.projects.filter(p => folderOf(p) === key && ((p.folderId && folderById(p.folderId) ? p.folderId : NONE) === folderId)); }
 function procMenu(anchor, key) {
   const fid = ui.home.folder;
-  const items = procItems(key, fid);
+  const main = (processesIn(fid).find(g => g.key === key) || {}).main;
   openPop(anchor, [
     { label: 'Öffnen', act: 'open-pid', id: (processesIn(fid).find(g => g.key === key) || {}).main?.id },
     { label: 'Als Teilschritte in anderes Projekt …', act: 'merge-pid', id: (processesIn(fid).find(g => g.key === key) || {}).main?.id },
+    main && main.template && { label: 'Neues Projekt aus Vorlage', act: 'proj-from-tpl', id: main.id },
+    main && { label: 'Duplizieren', act: 'proj-dup', id: main.id },
+    main && !main.archived && { label: main.template ? 'Vorlage entsperren' : 'Als Vorlage sperren', act: 'proj-lock', id: main.id },
     { sep: true },
     ...(state.folders || []).filter(f => f.id !== fid).map(f => ({ label: 'Verschieben nach ' + f.name, act: 'proc-move', id: key + '\u0001' + f.id })),
     fid !== NONE && { label: 'Aus dem Ordner nehmen', act: 'proc-move', id: key + '\u0001' + NONE },
@@ -2449,7 +2474,9 @@ function handleAct(act, el) {
     case 'menu': toggleMenu(el.dataset.menu, el); break;
     case 'proj-open': closeMenus(); switchProject(el.dataset.pid); break;
     case 'proj-new': closeMenus(); createProject(); break;
-    case 'proj-dup': closeMenus(); duplicateProject(); break;
+    case 'proj-dup': closeMenus(); duplicateProject(id || proj().id); break;
+    case 'proj-from-tpl': closeMenus(); duplicateProject(id || proj().id, true); break;
+    case 'proj-lock': closeMenus(); toggleTemplate(id || proj().id); break;
     case 'proj-del': closeMenus(); deleteProject(); break;
     case 'export': closeMenus(); exportData(); break;
     case 'cloud': closeMenus(); if (LF.open) LF.open(); break;
